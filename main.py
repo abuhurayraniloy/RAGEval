@@ -1,9 +1,9 @@
 from fastapi import FastAPI, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from litellm import acompletion
 from litellm.exceptions import APIError, APIConnectionError
 from dotenv import load_dotenv
-import os
 import logging
 
 load_dotenv()
@@ -31,16 +31,21 @@ async def request_llm(request: CompletionRequest):
                     "content": request.prompt
                 }
             ],
-            max_tokens=request.max_tokens
+            max_tokens=request.max_tokens,
+            stream=True
         )
 
-        if not response.choices:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="The LLM Provider Returned Empty Response."
-            )
+        async def stream_generator():
+            try:
+                async for chunk in response:
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        yield content
+            except Exception as stream_err:
+                logger.error(f"Stream interrupted: {str(stream_err)}", exc_info=True)
+                yield f"\n[Error: Stream Interrupted]"
         
-        return {"response": response.choices[0].message.content}
+        return StreamingResponse(stream_generator(), media_type="text/plain")
 
 
     except APIError as api_err:
