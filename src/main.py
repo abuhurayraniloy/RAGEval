@@ -1,15 +1,19 @@
 import time
+import uuid
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from litellm import acompletion
+from litellm import acompletion, aembedding
 from litellm.exceptions import APIError, APIConnectionError
 from dotenv import load_dotenv
 import logging
 
 from src.database import engine, AsyncSessionLocal
 from src.models import Base, Completion
+
+from qdrant_client.models import Distance, VectorParams, PointStruct
+from src.qdrant import qdrant_client
 
 load_dotenv()
 
@@ -21,6 +25,24 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         # In production, swap this for Alembic migrations
         await conn.run_sync(Base.metadata.create_all)
+
+        collection_name = "embeddings"
+        try:
+            exists = await qdrant_client.collection_exists(collection_name)
+            if not exists:
+                await qdrant_client.create_collection(
+                    collection_name = collection_name,
+                    vectors_config=VectorParams(
+                        size = 1536,
+                        distance = Distance.COSINE
+                    )
+                )
+                logger.info(f"Created Qdrant collection: {collection_name}")
+            else:
+                logger.info(f"Qdrant collection '{collection_name}' already exists.")
+        except Exception as e:
+            logger.error(f"Failed to connect to Qdrant: {str(e)}")
+
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -29,6 +51,13 @@ class CompletionRequest(BaseModel):
     prompt: str
     model: str = "groq/llama-3.3-70b-versatile"
     max_tokens: int = 500
+
+class EmbedRequest(BaseModel):
+    text: str
+
+class SearchRequest(BaseModel):
+    query: str
+    top_k: int = 5
 
 @app.get("/")
 async def root():
@@ -98,4 +127,83 @@ async def request_llm(request: CompletionRequest):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"An unexpected internal server error occurred."
+        )
+    
+@app.post("/embed")
+async def embed_text(request: EmbedRequest):
+    try:
+        embedding_response = await aembedding(
+            model= "gemini/gemini-embedding-001",
+            input = [request.text],
+            dimensions = 1536
+        )
+
+        vector = embedding_response.data[0].embedding
+
+        point_id = str(uuid.uuid4())
+
+        point = PointStruct(
+            id = point_id,
+            vector = vector,
+            payload = {
+                "text": request.text,
+                "source": "api_upload"
+            }
+        )
+
+        await qdrant_client.upsert(
+            collection_name="embeddings",
+            points=[point]
+        )
+
+        return {
+            "status": "success",
+            "point_id": point_id,
+            "message": "Text vectorized via Gemini and indexed in Qdrant successfully."
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to process vector embedding: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while computing or saving vector representation."
+        )
+
+@app.post("/search")
+async def search_qdrant(request: SearchRequest):
+    try:
+        embedding_response = await aembedding(
+            model="gemini/gemini-embedding-001", 
+            input=[request.query],
+            dimensions=1536
+        )
+        query_vector = embedding_response.data[0].embedding
+
+        search_response = await qdrant_client.query_points(
+            collection_name = "embeddings",
+            query = query_vector,
+            limit = request.top_k,
+            with_payload = True
+        )
+
+        formatted_results = [
+            {
+                "id": str(hit.id),
+                "score": hit.score,
+                "text": hit.payload.get("text", "no text found")
+            }
+            for hit in search_response.points
+        ]
+
+        return {
+            "status": "success",
+            "query": request.query,
+            "results": formatted_results
+        }
+    
+    except Exception as e:
+        logger.error(f"Search failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while searching the knowledge base."
         )

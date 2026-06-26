@@ -11,3 +11,5 @@ wheels/
 .env
 
 uvicorn.*
+
+CODEBASE.md
