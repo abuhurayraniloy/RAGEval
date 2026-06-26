@@ -13,6 +13,7 @@ dependencies = [
     "litellm>=1.89.3",
     "pydantic>=2.13.4",
     "python-dotenv>=1.2.2",
+    "qdrant-client>=1.18.0",
     "sqlalchemy>=2.0.51",
     "uvicorn>=0.49.0",
 ]
