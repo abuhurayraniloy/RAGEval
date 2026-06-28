@@ -1,5 +1,8 @@
 import time
 import uuid
+import hashlib
+import json
+from src.redis_client import redis_client
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -41,10 +44,23 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to connect to Qdrant: {str(e)}")
 
+        try:
+            await redis_client.ping()
+            logger.info("Connected to Redis cache.")
+        except Exception as e:
+            logger.error(f"Failed to connect Redis: {str(e)}")
+
     yield
 
 
 app = FastAPI(lifespan=lifespan)
+
+CACHE_TTL_SECONDS = 24 * 60 * 60
+
+
+def make_cache_key(question: str) -> str:
+    digest = hashlib.sha256(question.encode("utf-8")).hexdigest()
+    return f"rag: {digest}"
 
 
 class CompletionRequest(BaseModel):
@@ -207,6 +223,12 @@ async def search_qdrant(request: SearchRequest):
 
 @app.post("/rag")
 async def rag_endpoint(request: RagRequest):
+    cache_key = make_cache_key(request.question)
+
+    cached = await redis_client.get(cache_key)
+    if cached is not None:
+        logger.info(f"Cache hit for key {cache_key}")
+        return json.loads(cached)
     try:
         embedding_response = await aembedding(
             model="gemini/gemini-embedding-001",
@@ -246,12 +268,16 @@ async def rag_endpoint(request: RagRequest):
 
         answer = completion_response.choices[0].message.content
 
-        return {
+        result = {
             "status": "success",
             "question": request.question,
             "answer": answer,
             "sources": sources,
         }
+
+        await redis_client.set(cache_key, json.dumps(result), ex=CACHE_TTL_SECONDS)
+
+        return result
 
     except Exception as e:
         logger.error(f"RAG failed: {str(e)}", exc_info=True)
