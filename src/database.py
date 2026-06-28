@@ -2,8 +2,7 @@ import os
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
 DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://user:password@db:5432/rageval_logs"
+    "DATABASE_URL", "postgresql+asyncpg://user:password@db:5432/rageval_logs"
 )
 
 engine = create_async_engine(DATABASE_URL, echo=False)
