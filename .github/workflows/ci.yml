@@ -1,0 +1,42 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  # It is best practice to also run CI on pull requests targeting main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test-and-lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Install Dependencies
+        run: uv sync --dev
+
+      - name: Check Formatting (Black)
+        # uvx temporarily downloads and executes black without altering your environment
+        run: uvx black --check src/ tests/
+
+      - name: Run Tests (Pytest)
+        run: uv run pytest
+        env:
+          # Inject a dummy key so LiteLLM doesn't throw a missing-key exception during mocked tests
+          GEMINI_API_KEY: "dummy-key-for-ci"
