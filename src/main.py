@@ -44,7 +44,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to connect to Qdrant: {str(e)}")
 
-        try: 
+        try:
             await redis_client.ping()
             logger.info("Connected to Redis cache.")
         except Exception as e:
@@ -55,11 +55,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-CACHE_TTL_SECONDS = 24*60*60
+CACHE_TTL_SECONDS = 24 * 60 * 60
+
 
 def make_cache_key(question: str) -> str:
     digest = hashlib.sha256(question.encode("utf-8")).hexdigest()
     return f"rag: {digest}"
+
 
 class CompletionRequest(BaseModel):
     prompt: str
@@ -272,12 +274,8 @@ async def rag_endpoint(request: RagRequest):
             "answer": answer,
             "sources": sources,
         }
-    
-        await redis_client.set(
-            cache_key,
-            json.dumps(result),
-            ex = CACHE_TTL_SECONDS
-        )
+
+        await redis_client.set(cache_key, json.dumps(result), ex=CACHE_TTL_SECONDS)
 
         return result
 
