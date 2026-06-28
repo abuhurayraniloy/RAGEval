@@ -21,43 +21,54 @@ async def fake_redis():
 
 
 def make_fake_embedding():
-    return AsyncMock(
-        data=[type("Item", (), {"embedding": [0.1] * 1536})]
-    )
+    return AsyncMock(data=[type("Item", (), {"embedding": [0.1] * 1536})])
 
 
 def make_fake_search_result():
-    hit = type("Hit", (), {
-        "id": "abc123",
-        "score": 0.95,
-        "payload": {"text": "Paris is the capital of France."},
-    })
+    hit = type(
+        "Hit",
+        (),
+        {
+            "id": "abc123",
+            "score": 0.95,
+            "payload": {"text": "Paris is the capital of France."},
+        },
+    )
     return type("SearchResult", (), {"points": [hit]})
 
 
 def make_fake_completion(answer_text: str):
-    return AsyncMock(
-        choices=[AsyncMock(message=AsyncMock(content=answer_text))]
-    )
+    return AsyncMock(choices=[AsyncMock(message=AsyncMock(content=answer_text))])
 
 
 @pytest.mark.asyncio
 async def test_rag_cache_hit_skips_llm_and_embedding(fake_redis):
-    with patch("src.main.aembedding", return_value=make_fake_embedding()) as mock_embed, \
-         patch("src.main.qdrant_client.query_points", return_value=make_fake_search_result()), \
-         patch("src.main.acompletion", return_value=make_fake_completion("Paris.")) as mock_complete:
+    with (
+        patch("src.main.aembedding", return_value=make_fake_embedding()) as mock_embed,
+        patch(
+            "src.main.qdrant_client.query_points",
+            return_value=make_fake_search_result(),
+        ),
+        patch(
+            "src.main.acompletion", return_value=make_fake_completion("Paris.")
+        ) as mock_complete,
+    ):
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             # First call — cache miss
-            response1 = await client.post("/rag", json={"question": "Capital of France?"})
+            response1 = await client.post(
+                "/rag", json={"question": "Capital of France?"}
+            )
             assert response1.status_code == 200
             assert response1.json()["answer"] == "Paris."
             assert mock_embed.call_count == 1
             assert mock_complete.call_count == 1
 
             # Second call, same question — cache hit
-            response2 = await client.post("/rag", json={"question": "Capital of France?"})
+            response2 = await client.post(
+                "/rag", json={"question": "Capital of France?"}
+            )
             assert response2.status_code == 200
             assert response2.json() == response1.json()
 
@@ -68,9 +79,14 @@ async def test_rag_cache_hit_skips_llm_and_embedding(fake_redis):
 
 @pytest.mark.asyncio
 async def test_rag_cache_key_set_with_ttl(fake_redis):
-    with patch("src.main.aembedding", return_value=make_fake_embedding()), \
-         patch("src.main.qdrant_client.query_points", return_value=make_fake_search_result()), \
-         patch("src.main.acompletion", return_value=make_fake_completion("Paris.")):
+    with (
+        patch("src.main.aembedding", return_value=make_fake_embedding()),
+        patch(
+            "src.main.qdrant_client.query_points",
+            return_value=make_fake_search_result(),
+        ),
+        patch("src.main.acompletion", return_value=make_fake_completion("Paris.")),
+    ):
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
