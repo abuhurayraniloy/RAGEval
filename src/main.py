@@ -61,6 +61,8 @@ class SearchRequest(BaseModel):
     query: str
     top_k: int = 5
 
+class RagRequest(BaseModel):
+    question: str
 
 @app.get("/")
 async def root():
@@ -198,4 +200,66 @@ async def search_qdrant(request: SearchRequest):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An error occurred while searching the knowledge base.",
+        )
+
+@app.post("/rag")
+async def rag_endpoint(request: RagRequest):
+    try:
+        embedding_response = await aembedding(
+            model = "gemini/gemini-embedding-001",
+            input = [request.question],
+            dimensions = 1536
+        )
+
+        query_vector = embedding_response.data[0].embedding
+
+        search_result = await qdrant_client.query_points(
+            collection_name = "embeddings",
+            query = query_vector,
+            limit = 5,
+            with_payload = True
+        )
+
+        contexts = []
+        sources = []
+
+        for hit in search_result.points:
+            text = hit.payload.get("text")
+            if text:
+                contexts.append(text)
+                sources.append({
+                    "id": str(hit.id),
+                    "score": hit.score,
+                    "text": text
+                })
+
+        context_string = "\n\n---\n\n".join(contexts)
+
+        system_prompt = "Answer using only the provided context. If the answer is not in the context, say so."
+        user_prompt = f"Context: \n{context_string}\n\nQuestion:\n{request.question}"
+
+        completion_response = await acompletion(
+            model = "groq/llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        )
+
+        # logger.info(f"LLM Full Response: {completion_response}")
+
+        answer = completion_response.choices[0].message.content
+
+        return {
+            "status": "success",
+            "question": request.question,
+            "answer": answer,
+            "sources": sources
+        }
+    
+    except Exception as e:
+        logger.error(f"RAG failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred during the RAG process."
         )
