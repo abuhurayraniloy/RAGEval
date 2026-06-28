@@ -5,6 +5,7 @@ import datetime
 
 Base = declarative_base()
 
+
 class Completion(Base):
     __tablename__ = "completions"
 
@@ -16,6 +17,3 @@ class Completion(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
-
-    
-    
