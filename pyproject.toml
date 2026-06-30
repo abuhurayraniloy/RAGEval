@@ -11,11 +11,13 @@ dependencies = [
     "grok>=6.2",
     "groq>=1.5.0",
     "litellm>=1.89.3",
+    "nltk>=3.9.4",
     "pydantic>=2.13.4",
     "python-dotenv>=1.2.2",
     "qdrant-client>=1.18.0",
     "redis>=8.0.1",
     "sqlalchemy>=2.0.51",
+    "tiktoken>=0.13.0",
     "uvicorn>=0.49.0",
 ]
 
