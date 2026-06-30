@@ -2,6 +2,7 @@ import time
 import uuid
 import hashlib
 import json
+import nltk
 from src.redis_client import redis_client
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status
@@ -13,10 +14,12 @@ from dotenv import load_dotenv
 import logging
 
 from src.database import engine, AsyncSessionLocal
-from src.models import Base, Completion
+from src.models import Base, Completion, Chunk
 
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from src.qdrant import qdrant_client
+
+from src.chunking import ChunkStrategy, chunk_text
 
 load_dotenv()
 
@@ -50,6 +53,19 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to connect Redis: {str(e)}")
 
+    for resources in ("tokenizers/punkt_tab", "tokenizers/punkt"):
+        try:
+            nltk.data.find(resources)
+            break
+        except LookupError:
+            continue
+
+    else:
+        try:
+            nltk.download("punkt_tab", quiet=True)
+        except Exception as e:
+            logger.error(f"Failed to download nltk punkt_tab: {str(e)}")
+
     yield
 
 
@@ -71,6 +87,8 @@ class CompletionRequest(BaseModel):
 
 class EmbedRequest(BaseModel):
     text: str
+    strategy: ChunkStrategy = ChunkStrategy.PARAGRAPH
+    source: str = "api_upload"
 
 
 class SearchRequest(BaseModel):
@@ -153,27 +171,74 @@ async def request_llm(request: CompletionRequest):
 @app.post("/embed")
 async def embed_text(request: EmbedRequest):
     try:
+        chunks = chunk_text(request.text, request.strategy)
+
+        if not chunks:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No content to embed after chunking (maybe input is empty).",
+            )
+
         embedding_response = await aembedding(
-            model="gemini/gemini-embedding-001", input=[request.text], dimensions=1536
+            model="gemini/gemini-embedding-001", input=chunks, dimensions=1536
         )
 
-        vector = embedding_response.data[0].embedding
+        points = []
+        chunk_rows = []
 
-        point_id = str(uuid.uuid4())
+        for idx, (chunk_text_value, emb_item) in enumerate(
+            zip(chunks, embedding_response.data)
+        ):
+            point_id = str(uuid.uuid4())
 
-        point = PointStruct(
-            id=point_id,
-            vector=vector,
-            payload={"text": request.text, "source": "api_upload"},
-        )
+            points.append(
+                PointStruct(
+                    id=point_id,
+                    vector=(
+                        emb_item["embedding"]
+                        if isinstance(emb_item, dict)
+                        else emb_item.embedding
+                    ),
+                    payload={
+                        "text": chunk_text_value,
+                        "source": request.source,
+                        "strategy": request.strategy,
+                        "chunk_index": idx,
+                        "chunk_count": len(chunks),
+                    },
+                )
+            )
 
-        await qdrant_client.upsert(collection_name="embeddings", points=[point])
+            chunk_rows.append(
+                Chunk(
+                    point_id=point_id,
+                    text=chunk_text_value,
+                    strategy=request.strategy.value,
+                    chunk_index=idx,
+                    source=request.source,
+                )
+            )
+
+        await qdrant_client.upsert(collection_name="embeddings", points=points)
+
+        async with AsyncSessionLocal() as session:
+            session.add_all(chunk_rows)
+            await session.commit()
 
         return {
             "status": "success",
-            "point_id": point_id,
-            "message": "Text vectorized via Gemini and indexed in Qdrant successfully.",
+            "strategy": request.strategy.value,
+            "chunk_count": len(chunks),
+            "point_ids": [p.id for p in points],
+            "message": (
+                f"Text split into {len(chunks)} chunk(s) using "
+                f"'{request.strategy.value}' strategy, embedded via Gemini, "
+                "and indexed in Qdrant."
+            ),
         }
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         logger.error(f"Failed to process vector embedding: {str(e)}", exc_info=True)

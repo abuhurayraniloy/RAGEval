@@ -13,8 +13,12 @@ COPY pyproject.toml uv.lock ./
 # 5. Download and install all external libraries into a virtual environment
 RUN uv sync --frozen --no-dev --no-install-project
 
-# 6. Copy your actual application source code
+# 6. Bake nltk punkt_tab tokenizer data into the image so the sentence
+#    chunking strategy works offline with no runtime download penalty.
+RUN uv run python -c "import nltk; nltk.download('punkt_tab', quiet=True)"
+
+# 7. Copy your actual application source code
 COPY src/ src/
 
-# 7. Start your production Uvicorn web server
+# 8. Start your production Uvicorn web server
 CMD ["uv", "run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
