@@ -2,8 +2,25 @@ import re
 from enum import Enum
 from typing import List
 
+import nltk
+import logging
 import tiktoken
 from nltk.tokenize import sent_tokenize
+
+logger = logging.getLogger(__name__)
+
+# Ensure punkt_tab is available for sentence tokenization
+for resource in ("tokenizers/punkt_tab", "tokenizers/punkt"):
+    try:
+        nltk.data.find(resource)
+        break
+    except LookupError:
+        continue
+else:
+    try:
+        nltk.download("punkt_tab", quiet=True)
+    except Exception as e:
+        logger.error(f"Failed to download nltk punkt_tab: {str(e)}")
 
 
 class ChunkStrategy(str, Enum):
