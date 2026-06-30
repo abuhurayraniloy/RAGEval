@@ -15,6 +15,7 @@ import logging
 
 from src.database import engine, AsyncSessionLocal
 from src.models import Base, Completion, Chunk
+from src.reranker import get_reranker, rerank, RERANK_CANDIDATES_K
 
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from src.qdrant import qdrant_client
@@ -53,9 +54,9 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to connect Redis: {str(e)}")
 
-    for resources in ("tokenizers/punkt_tab", "tokenizers/punkt"):
+    for resource in ("tokenizers/punkt_tab", "tokenizers/punkt"):
         try:
-            nltk.data.find(resources)
+            nltk.data.find(resource)
             break
         except LookupError:
             continue
@@ -65,6 +66,12 @@ async def lifespan(app: FastAPI):
             nltk.download("punkt_tab", quiet=True)
         except Exception as e:
             logger.error(f"Failed to download nltk punkt_tab: {str(e)}")
+
+    try:
+        get_reranker()
+        logger.info("Cross encoder reranker loaded.")
+    except Exception as e:
+        logger.error(f"Failed to load reranker {str(e)}")
 
     yield
 
@@ -202,7 +209,7 @@ async def embed_text(request: EmbedRequest):
                     payload={
                         "text": chunk_text_value,
                         "source": request.source,
-                        "strategy": request.strategy,
+                        "strategy": request.strategy.value,
                         "chunk_index": idx,
                         "chunk_count": len(chunks),
                     },
@@ -304,17 +311,41 @@ async def rag_endpoint(request: RagRequest):
         query_vector = embedding_response.data[0].embedding
 
         search_result = await qdrant_client.query_points(
-            collection_name="embeddings", query=query_vector, limit=5, with_payload=True
+            collection_name="embeddings",
+            query=query_vector,
+            limit=RERANK_CANDIDATES_K,
+            with_payload=True,
         )
+
+        candidate_hits = [
+            hit for hit in search_result.points if hit.payload.get("text")
+        ]
+
+        candidate_texts = [hit.payload["text"] for hit in candidate_hits]
+
+        reranked = rerank(request.question, candidate_texts, top_k=5)
 
         contexts = []
         sources = []
 
-        for hit in search_result.points:
-            text = hit.payload.get("text")
-            if text:
-                contexts.append(text)
-                sources.append({"id": str(hit.id), "score": hit.score, "text": text})
+        for original_idx, rerank_score in reranked:
+            hit = candidate_hits[original_idx]
+            text = hit.payload["text"]
+            contexts.append(text)
+            sources.append(
+                {
+                    "id": str(hit.id),
+                    "vector_score": hit.score,
+                    "rerank_score": rerank_score,
+                    "text": text,
+                }
+            )
+
+        # for hit in search_result.points:
+        #     text = hit.payload.get("text")
+        #     if text:
+        #         contexts.append(text)
+        #         sources.append({"id": str(hit.id), "score": hit.score, "text": text})
 
         context_string = "\n\n---\n\n".join(contexts)
 
