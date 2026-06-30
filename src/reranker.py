@@ -1,0 +1,36 @@
+import logging
+from typing import List, Tuple
+
+from sentence_transformers import CrossEncoder
+
+logger = logging.getLogger("uvicorn.error")
+
+RERANKER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+RERANK_CANDIDATES_K = 20
+
+_model: CrossEncoder | None = None
+
+
+def get_reranker() -> CrossEncoder:
+    global _model
+    if _model is None:
+        logger.info(f"Loading cross-encoder reranker: {RERANKER_MODEL_NAME}")
+        _model = CrossEncoder(RERANKER_MODEL_NAME)
+    return _model
+
+
+def rerank(
+    query: str, candidates: List[str], top_k: int = 5
+) -> List[Tuple[int, float]]:
+    if not candidates:
+        return []
+
+    model = get_reranker()
+    pairs = [(query, candidate) for candidate in candidates]
+    scores = model.predict(pairs)
+
+    scored = list(enumerate(scores))
+    scored.sort(key=lambda pair: pair[1], reverse=True)
+
+    return [(idx, float(score)) for idx, score in scored[:top_k]]
