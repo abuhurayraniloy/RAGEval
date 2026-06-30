@@ -31,6 +31,10 @@ jobs:
       - name: Install Dependencies
         run: uv sync --dev
 
+      - name: Download NLTK Data
+        run: |
+          python -m nltk.downloader punkt_tab
+
       - name: Check Formatting (Black)
         # uvx temporarily downloads and executes black without altering your environment
         run: uvx black --check src/ tests/
