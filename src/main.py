@@ -2,6 +2,7 @@ import time
 import uuid
 import hashlib
 import json
+import litellm
 import nltk
 from src.redis_client import redis_client
 from contextlib import asynccontextmanager
@@ -25,6 +26,8 @@ from src.chunking import ChunkStrategy, chunk_text
 load_dotenv()
 
 logger = logging.getLogger("uvicorn.error")
+
+JUDGE_MODEL = "gemini/gemini-2.0-flash"
 
 
 # Lifespan context to ensure our table exists on startup
@@ -105,6 +108,119 @@ class SearchRequest(BaseModel):
 
 class RagRequest(BaseModel):
     question: str
+
+
+class EvalQuestion(BaseModel):
+    question: str
+    expected: str
+
+
+class EvalRequest(BaseModel):
+    questions: list[EvalQuestion]
+
+
+def _extract_cost(response) -> float:
+    try:
+        return litellm.completion_cost(completion_response=response)
+    except Exception:
+        return 0.00
+
+
+async def _rag_run_pipeline(question: str) -> dict:
+    t0 = time.time()
+
+    emb_response = await aembedding(
+        model="gemini/gemini-embedding-001", input=[question], dimensions=1536
+    )
+
+    query_vector = emb_response.data[0].embedding
+
+    search_result = await qdrant_client.query_points(
+        collection_name="embeddings",
+        query=query_vector,
+        limit=RERANK_CANDIDATES_K,
+        with_payload=True,
+    )
+
+    candidate_hits = [hit for hit in search_result.points if hit.payload.get("text")]
+    candidate_texts = [hit.payload["text"] for hit in candidate_hits]
+
+    reranked = rerank(question, candidate_texts, top_k=5)
+
+    contexts, sources = [], []
+
+    for orig_idx, rerank_score in reranked:
+        hit = candidate_hits[orig_idx]
+        text = hit.payload["text"]
+        contexts.append(text)
+        sources.append(
+            {
+                "id": str(hit.id),
+                "vector_score": hit.score,
+                "rerank_score": rerank_score,
+                "text": text,
+            }
+        )
+
+    # 4. Generate answer
+    context_string = "\n\n---\n\n".join(contexts)
+    system_prompt = (
+        "Answer using only the provided context. "
+        "If the answer is not in the context, say so."
+    )
+    user_prompt = f"Context:\n{context_string}\n\nQuestion:\n{question}"
+
+    llm_response = await acompletion(
+        model="groq/llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+
+    answer = llm_response.choices[0].message.content
+    latency_ms = int((time.time() - t0) * 1000)
+    llm_cost = _extract_cost(llm_response)
+
+    return {
+        "answer": answer,
+        "sources": sources,
+        "latency_ms": latency_ms,
+        "llm_cost_usd": llm_cost,
+    }
+
+
+async def _judge_answer(question: str, expected: str, actual: str) -> tuple[int, float]:
+    prompt = (
+        "You are a strict answer evaluator for a RAG system.\n\n"
+        f"Question: {question}\n"
+        f"Expected answer: {expected}\n"
+        f"Actual answer: {actual}\n\n"
+        "Does the actual answer correctly address the question with the same "
+        "key information as the expected answer?\n\n"
+        "Reply with ONLY the digit 1 (correct) or 0 (incorrect). "
+        "No explanation, no punctuation — just the digit."
+    )
+
+    response = await acompletion(
+        model=JUDGE_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=128,
+    )
+
+    logger.info(response)
+
+    content = response.choices[0].message.content
+
+    if content is None:
+        raise RuntimeError(f"Judge returned no content: {response}")
+
+    raw = content.strip()
+
+    score = next((int(c) for c in raw if c in "01"), 0)
+    cost = _extract_cost(response)
+
+    return score, cost
 
 
 @app.get("/")
@@ -380,3 +496,80 @@ async def rag_endpoint(request: RagRequest):
         raise HTTPException(
             status_code=500, detail="An error occurred during the RAG process."
         )
+
+
+@app.post("/evaluate")
+async def evaluate(request: EvalRequest):
+    if not request.questions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide at least one question.",
+        )
+
+    results = []
+    total_score = 0
+    total_latency_ms = 0
+    total_llm_cost = 0.0
+    total_judge_cost = 0.0
+
+    for item in request.questions:
+        logger.info(f"[evaluate] running: {item.question[:60]}")
+
+        try:
+            rag = await _rag_run_pipeline(item.question)
+
+            score, judge_cost = await _judge_answer(
+                item.question, item.expected, rag["answer"]
+            )
+
+            total_score += score
+            total_latency_ms += rag["latency_ms"]
+            total_llm_cost += rag["llm_cost_usd"]
+            total_judge_cost += judge_cost
+
+            results.append(
+                {
+                    "question": item.question,
+                    "expected": item.expected,
+                    "actual": rag["answer"],
+                    "score": score,
+                    "latency_ms": rag["latency_ms"],
+                    "sources_used": len(rag["sources"]),
+                }
+            )
+
+        except Exception as e:
+            logger.error(
+                f"[evaluate] Failed on '{item.question[:60]}': {e}", exc_info=True
+            )
+            # Count failed questions as score 0 so accuracy is not inflated
+            results.append(
+                {
+                    "question": item.question,
+                    "expected": item.expected,
+                    "actual": "",
+                    "score": 0,
+                    "latency_ms": 0,
+                    "sources_used": 0,
+                    "error": str(e),
+                }
+            )
+
+    n = len(results)
+    passed = sum(r["score"] for r in results)
+    failed = n - passed
+
+    return {
+        "accuracy": round(passed / n, 3),
+        "average_latency_ms": round(total_latency_ms / n, 1),
+        "total_cost_usd": round(total_llm_cost + total_judge_cost, 6),
+        "cost_breakdown": {
+            "llm_cost_usd": round(total_llm_cost, 6),
+            "judge_cost_usd": round(total_judge_cost, 6),
+        },
+        "total_questions": n,
+        "passed": passed,
+        "failed": failed,
+        "judge_model": JUDGE_MODEL,
+        "results": results,
+    }
