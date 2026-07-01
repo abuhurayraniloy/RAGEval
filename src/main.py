@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from litellm import acompletion, aembedding, completion_cost
+from litellm import acompletion, aembedding
 from litellm.exceptions import APIError, APIConnectionError
 from dotenv import load_dotenv
 import logging
@@ -27,7 +27,7 @@ load_dotenv()
 
 logger = logging.getLogger("uvicorn.error")
 
-JUDGE_MODEL = "gemini/gemini-2.5-flash"
+JUDGE_MODEL = "gemini/gemini-2.0-flash"
 
 
 # Lifespan context to ensure our table exists on startup
@@ -205,9 +205,17 @@ async def _judge_answer(question: str, expected: str, actual: str) -> tuple[int,
     response = await acompletion(
         model=JUDGE_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=8,
+        max_tokens=128,
     )
-    raw = response.choices[0].message.content.strip()
+
+    logger.info(response)
+
+    content = response.choices[0].message.content
+
+    if content is None:
+        raise RuntimeError(f"Judge returned no content: {response}")
+
+    raw = content.strip()
 
     score = next((int(c) for c in raw if c in "01"), 0)
     cost = _extract_cost(response)
