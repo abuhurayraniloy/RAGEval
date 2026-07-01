@@ -26,6 +26,8 @@ load_dotenv()
 
 logger = logging.getLogger("uvicorn.error")
 
+JUDGE_MODEL = "gemini/gemini-2.5-flash"
+
 
 # Lifespan context to ensure our table exists on startup
 @asynccontextmanager
@@ -105,6 +107,15 @@ class SearchRequest(BaseModel):
 
 class RagRequest(BaseModel):
     question: str
+
+
+class EvalQuestion(BaseModel):
+    question: str
+    expected: str
+
+
+class EvalRequest(BaseModel):
+    questions: list[EvalQuestion]
 
 
 @app.get("/")
