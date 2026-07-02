@@ -27,7 +27,7 @@ load_dotenv()
 
 logger = logging.getLogger("uvicorn.error")
 
-JUDGE_MODEL = "gemini/gemini-2.0-flash"
+JUDGE_MODEL = "cerebras/gemma-4-31b"
 
 
 # Lifespan context to ensure our table exists on startup
@@ -205,7 +205,7 @@ async def _judge_answer(question: str, expected: str, actual: str) -> tuple[int,
     response = await acompletion(
         model=JUDGE_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=128,
+        max_tokens=64,
     )
 
     logger.info(response)
