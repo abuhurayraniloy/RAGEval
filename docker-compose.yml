@@ -42,7 +42,7 @@ services:
       - qdrant
       - redis
     volumes:
-      - ./src:/src
+      - ./src:/app/src
 
 volumes:
   postgres_data:
