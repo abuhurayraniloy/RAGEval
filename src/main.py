@@ -1,3 +1,5 @@
+import asyncio
+import os
 import time
 import uuid
 import hashlib
@@ -76,6 +78,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to load reranker {str(e)}")
 
+    if os.getenv("PRELOAD_RERANKER", "false").lower() == "true":
+        try:
+            get_reranker()
+            logger.info("Cross Encoder loaded.")
+        except Exception as e:
+            logger.error(f"Failed to load the Cross Encode reranker: {str(e)}")
+    else:
+        logger.info(
+            "Skipping reranker preload (PRELOAD_RERANKER not set to true). "
+            "It will load lazily on first use."
+        )
     yield
 
 
@@ -498,6 +511,49 @@ async def rag_endpoint(request: RagRequest):
         )
 
 
+EVAL_CONCURRENCY = 30
+
+
+async def _evaluate_one(item: EvalRequest, semaphore: asyncio.Semaphore) -> dict:
+    async with semaphore:
+        logger.info(f"[evaluate] Running: {item.question[:60]}...")
+        try:
+            # 1. Run the full RAG pipeline (no cache)
+            rag = await _rag_run_pipeline(item.question)
+
+            score, judge_cost = await _judge_answer(
+                item.question, item.expected, rag["answer"]
+            )
+
+            return {
+                "question": item.question,
+                "expected": item.expected,
+                "actual": rag["answer"],
+                "score": score,
+                "latency_ms": rag["latency_ms"],
+                "sources_used": len(rag["sources"]),
+                "llm_cost_usd": rag["llm_cost_usd"],
+                "judge_cost_usd": judge_cost,
+            }
+
+        except Exception as e:
+            logger.error(
+                f"[evaluate] Failed on '{item.question[:60]}': {e}", exc_info=True
+            )
+            # Count failed questions as score 0 so accuracy is not inflated
+            return {
+                "question": item.question,
+                "expected": item.expected,
+                "actual": "",
+                "score": 0,
+                "latency_ms": 0,
+                "sources_used": 0,
+                "llm_cost_usd": 0.0,
+                "judge_cost_usd": 0.0,
+                "error": str(e),
+            }
+
+
 @app.post("/evaluate")
 async def evaluate(request: EvalRequest):
     if not request.questions:
@@ -506,70 +562,55 @@ async def evaluate(request: EvalRequest):
             detail="Provide at least one question.",
         )
 
-    results = []
-    total_score = 0
-    total_latency_ms = 0
-    total_llm_cost = 0.0
-    total_judge_cost = 0.0
+    try:
+        # CHANGED: was a sequential `for item in request.questions:` loop with
+        # `await` on each iteration. Now schedules all questions at once and
+        # lets asyncio.gather() drive them concurrently, throttled to
+        # EVAL_CONCURRENCY in-flight at a time by the semaphore inside
+        # _evaluate_one().
+        batch_start = time.time()
+        semaphore = asyncio.Semaphore(EVAL_CONCURRENCY)
+        results = await asyncio.gather(
+            *[_evaluate_one(item, semaphore) for item in request.questions]
+        )
+        batch_wall_time_ms = int((time.time() - batch_start) * 1000)
 
-    for item in request.questions:
-        logger.info(f"[evaluate] running: {item.question[:60]}")
+        total_latency_ms = sum(r["latency_ms"] for r in results)
+        total_llm_cost = sum(r["llm_cost_usd"] for r in results)
+        total_judge_cost = sum(r["judge_cost_usd"] for r in results)
 
-        try:
-            rag = await _rag_run_pipeline(item.question)
+        n = len(results)
+        passed = sum(r["score"] for r in results)
+        failed = n - passed
 
-            score, judge_cost = await _judge_answer(
-                item.question, item.expected, rag["answer"]
-            )
+        return {
+            "accuracy": round(passed / n, 3),
+            "average_latency_ms": round(total_latency_ms / n, 1),
+            # CHANGED: new field - actual wall-clock time for the whole batch,
+            # which is what the concurrency change is meant to improve.
+            # average_latency_ms above is unchanged in meaning (mean per-question
+            # pipeline latency); batch_wall_time_ms is the new number that shows
+            # the speedup from parallelizing.
+            "batch_wall_time_ms": batch_wall_time_ms,
+            "eval_concurrency": EVAL_CONCURRENCY,
+            "total_cost_usd": round(total_llm_cost + total_judge_cost, 6),
+            "cost_breakdown": {
+                "llm_cost_usd": round(total_llm_cost, 6),
+                "judge_cost_usd": round(total_judge_cost, 6),
+            },
+            "total_questions": n,
+            "passed": passed,
+            "failed": failed,
+            "judge_model": JUDGE_MODEL,
+            "results": results,
+        }
 
-            total_score += score
-            total_latency_ms += rag["latency_ms"]
-            total_llm_cost += rag["llm_cost_usd"]
-            total_judge_cost += judge_cost
-
-            results.append(
-                {
-                    "question": item.question,
-                    "expected": item.expected,
-                    "actual": rag["answer"],
-                    "score": score,
-                    "latency_ms": rag["latency_ms"],
-                    "sources_used": len(rag["sources"]),
-                }
-            )
-
-        except Exception as e:
-            logger.error(
-                f"[evaluate] Failed on '{item.question[:60]}': {e}", exc_info=True
-            )
-            # Count failed questions as score 0 so accuracy is not inflated
-            results.append(
-                {
-                    "question": item.question,
-                    "expected": item.expected,
-                    "actual": "",
-                    "score": 0,
-                    "latency_ms": 0,
-                    "sources_used": 0,
-                    "error": str(e),
-                }
-            )
-
-    n = len(results)
-    passed = sum(r["score"] for r in results)
-    failed = n - passed
-
-    return {
-        "accuracy": round(passed / n, 3),
-        "average_latency_ms": round(total_latency_ms / n, 1),
-        "total_cost_usd": round(total_llm_cost + total_judge_cost, 6),
-        "cost_breakdown": {
-            "llm_cost_usd": round(total_llm_cost, 6),
-            "judge_cost_usd": round(total_judge_cost, 6),
-        },
-        "total_questions": n,
-        "passed": passed,
-        "failed": failed,
-        "judge_model": JUDGE_MODEL,
-        "results": results,
-    }
+    # NEW: catch-all so the client always gets a diagnosable JSON error
+    # instead of Starlette's generic text/plain 500 page. The full
+    # traceback still goes to the server logs via exc_info=True.
+    except Exception as e:
+        logger.error(f"[evaluate] Batch evaluation failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Evaluation batch failed: {str(e)}",
+        )
