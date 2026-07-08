@@ -1,3 +1,5 @@
+"""SQLAlchemy ORM models for logging and vector management."""
+
 from sqlalchemy import String, Integer, Text, DateTime
 from sqlalchemy.sql import func
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column

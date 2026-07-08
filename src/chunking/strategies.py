@@ -1,3 +1,5 @@
+"""Text chunking strategies for splitting documents into smaller pieces."""
+
 import re
 from enum import Enum
 from typing import List
