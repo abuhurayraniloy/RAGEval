@@ -16,7 +16,7 @@ _model: CrossEncoder | None = None
 
 def get_reranker() -> CrossEncoder:
     """Load and cache the cross-encoder reranker model.
-    
+
     Returns:
         Loaded CrossEncoder model
     """
@@ -31,12 +31,12 @@ def rerank(
     query: str, candidates: List[str], top_k: int = 5
 ) -> List[Tuple[int, float]]:
     """Rerank candidates based on relevance to query.
-    
+
     Args:
         query: Query text
         candidates: List of candidate texts to rerank
         top_k: Number of top results to return
-        
+
     Returns:
         List of (index, score) tuples, sorted by score descending
     """

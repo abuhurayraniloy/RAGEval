@@ -10,12 +10,12 @@ JUDGE_MODEL = "cerebras/gemma-4-31b"
 
 async def judge_answer(question: str, expected: str, actual: str) -> tuple[int, float]:
     """Judge if an actual answer correctly addresses a question.
-    
+
     Args:
         question: Original question
         expected: Expected reference answer
         actual: Actual answer to evaluate
-        
+
     Returns:
         Tuple of (score, cost) where score is 1 (correct) or 0 (incorrect),
         and cost is the USD cost of the evaluation
@@ -47,7 +47,7 @@ async def judge_answer(question: str, expected: str, actual: str) -> tuple[int, 
     raw = content.strip()
 
     score = next((int(c) for c in raw if c in "01"), 0)
-    
+
     try:
         cost = completion_cost(completion_response=response)
     except Exception:
@@ -58,10 +58,10 @@ async def judge_answer(question: str, expected: str, actual: str) -> tuple[int, 
 
 def extract_cost(response) -> float:
     """Extract cost from a completion response.
-    
+
     Args:
         response: Completion response object
-        
+
     Returns:
         Cost in USD, or 0.0 if unable to calculate
     """

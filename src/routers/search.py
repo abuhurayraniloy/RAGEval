@@ -5,7 +5,7 @@ from fastapi import HTTPException, status
 from pydantic import BaseModel
 
 from src.services.embeddings import embed_text
-from src.services.retrieval import search_vectors
+from src.services.retrieval import search_hybrid
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -17,17 +17,17 @@ class SearchRequest(BaseModel):
 
 async def search_qdrant(request: SearchRequest):
     """Handle vector search requests.
-    
+
     Args:
         request: SearchRequest with query and top_k
-        
+
     Returns:
         Dictionary with search results
     """
     try:
         query_vector = await embed_text(request.query)
-        
-        search_results = await search_vectors(
+
+        search_results = await search_hybrid(
             query_vector=query_vector,
             collection_name="embeddings",
             limit=request.top_k,

@@ -6,10 +6,10 @@ from fastapi import HTTPException, status
 from pydantic import BaseModel
 
 from src.chunking import ChunkStrategy, chunk_text
-from src.services.embeddings import embed_texts
+from src.services.embeddings import embed_texts, embed_sparse_batch
 from src.clients import qdrant_client
 from src.db import AsyncSessionLocal, Chunk
-from qdrant_client.models import PointStruct
+from qdrant_client.models import PointStruct, SparseVector
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -22,10 +22,10 @@ class EmbedRequest(BaseModel):
 
 async def embed_text_handler(request: EmbedRequest):
     """Handle text embedding requests.
-    
+
     Args:
         request: EmbedRequest with text, strategy, and source
-        
+
     Returns:
         Dictionary with embedding results and point IDs
     """
@@ -38,20 +38,28 @@ async def embed_text_handler(request: EmbedRequest):
                 detail="No content to embed after chunking (maybe input is empty).",
             )
 
-        embedding_response = await embed_texts(chunks)
+        # embedding_response = await embed_texts(chunks)
+
+        dense_vectors = await embed_texts(chunks)
+        sparse_vectors = embed_sparse_batch(chunks)
 
         points = []
         chunk_rows = []
 
-        for idx, (chunk_text_value, embedding) in enumerate(
-            zip(chunks, embedding_response)
+        for idx, (chunk_text_value, dense, sparse) in enumerate(
+            zip(chunks, dense_vectors, sparse_vectors)
         ):
             point_id = str(uuid.uuid4())
 
             points.append(
                 PointStruct(
                     id=point_id,
-                    vector=embedding,
+                    vector={
+                        "dense": dense,
+                        "sparse": SparseVector(
+                            indices=sparse["indices"], values=sparse["values"]
+                        ),
+                    },
                     payload={
                         "text": chunk_text_value,
                         "source": request.source,
@@ -86,7 +94,7 @@ async def embed_text_handler(request: EmbedRequest):
             "message": (
                 f"Text split into {len(chunks)} chunk(s) using "
                 f"'{request.strategy.value}' strategy, embedded via Gemini, "
-                "and indexed in Qdrant."
+                "+ BM25 (sparse), and indexed in Qdrant."
             ),
         }
 

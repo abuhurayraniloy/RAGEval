@@ -25,11 +25,11 @@ class EvalRequest(BaseModel):
 
 async def _evaluate_one(item: EvalQuestion, semaphore: asyncio.Semaphore) -> dict:
     """Evaluate a single question-answer pair.
-    
+
     Args:
         item: Question and expected answer
         semaphore: Concurrency control semaphore
-        
+
     Returns:
         Evaluation result with score and metrics
     """
@@ -73,10 +73,10 @@ async def _evaluate_one(item: EvalQuestion, semaphore: asyncio.Semaphore) -> dic
 
 async def evaluate(request: EvalRequest):
     """Run evaluation on a batch of questions.
-    
+
     Args:
         request: EvalRequest with list of questions and expected answers
-        
+
     Returns:
         Dictionary with accuracy, latency, costs, and per-question results
     """

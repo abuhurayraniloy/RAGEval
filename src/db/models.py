@@ -4,6 +4,7 @@ from sqlalchemy import String, Integer, Text, DateTime
 from sqlalchemy.sql import func
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column
 import datetime
+import secrets
 
 Base = declarative_base()
 
@@ -33,3 +34,19 @@ class Chunk(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    prefix: Mapped[str] = mapped_column(String(12), index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_used_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked: Mapped[bool] = mapped_column(default=False)

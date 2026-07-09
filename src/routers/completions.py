@@ -21,20 +21,23 @@ class CompletionRequest(BaseModel):
 
 async def request_llm(request: CompletionRequest):
     """Handle LLM completion requests with streaming and logging.
-    
+
     Args:
         request: CompletionRequest with prompt, model, and max_tokens
-        
+
     Returns:
         StreamingResponse with generated text
     """
     start_time = time.time()
 
     try:
+
         async def stream_generator():
             full_response_text = ""
             try:
-                async for chunk in stream_completion(request.prompt, request.model, request.max_tokens):
+                async for chunk in stream_completion(
+                    request.prompt, request.model, request.max_tokens
+                ):
                     full_response_text += chunk
                     yield chunk
             except Exception as stream_err:

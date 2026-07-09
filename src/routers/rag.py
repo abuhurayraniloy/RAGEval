@@ -15,20 +15,20 @@ class RagRequest(BaseModel):
 
 async def rag_endpoint(request: RagRequest):
     """Handle RAG pipeline requests.
-    
+
     Args:
         request: RagRequest with question
-        
+
     Returns:
         Dictionary with answer, sources, and metadata
     """
     try:
         result = await rag_pipeline(request.question, use_cache=True)
-        
+
         # Add status to response
         result["status"] = "success"
         result["question"] = request.question
-        
+
         return result
 
     except Exception as e:

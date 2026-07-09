@@ -10,10 +10,10 @@ CACHE_TTL_SECONDS = 24 * 60 * 60
 
 def make_cache_key(question: str) -> str:
     """Generate a cache key from a question.
-    
+
     Args:
         question: Question to hash
-        
+
     Returns:
         Cache key string
     """
@@ -23,10 +23,10 @@ def make_cache_key(question: str) -> str:
 
 async def get_cached(key: str) -> Optional[dict]:
     """Retrieve cached value.
-    
+
     Args:
         key: Cache key
-        
+
     Returns:
         Cached value as dict, or None if not found
     """
@@ -37,12 +37,10 @@ async def get_cached(key: str) -> Optional[dict]:
 
 
 async def set_cache(
-    key: str, 
-    value: dict, 
-    ttl_seconds: int = CACHE_TTL_SECONDS
+    key: str, value: dict, ttl_seconds: int = CACHE_TTL_SECONDS
 ) -> None:
     """Store value in cache.
-    
+
     Args:
         key: Cache key
         value: Value to cache
@@ -53,7 +51,7 @@ async def set_cache(
 
 async def clear_cache(key: str) -> None:
     """Clear a cache entry.
-    
+
     Args:
         key: Cache key to delete
     """
