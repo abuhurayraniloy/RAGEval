@@ -1,3 +1,5 @@
+"""Database session configuration and engine setup."""
+
 import os
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 

@@ -1,616 +1,140 @@
-import asyncio
 import os
-import time
-import uuid
-import hashlib
-import json
-import litellm
 import nltk
-from src.redis_client import redis_client
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, status
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from litellm import acompletion, aembedding
-from litellm.exceptions import APIError, APIConnectionError
+from fastapi import FastAPI, Depends, Request
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from dotenv import load_dotenv
 import logging
 
-from src.database import engine, AsyncSessionLocal
-from src.models import Base, Completion, Chunk
-from src.reranker import get_reranker, rerank, RERANK_CANDIDATES_K
+from src.db import engine, Base
+from src.clients import qdrant_client, redis_client
+from src.services.reranking import get_reranker
+from qdrant_client.models import Distance, VectorParams, SparseVectorParams
 
-from qdrant_client.models import Distance, VectorParams, PointStruct
-from src.qdrant import qdrant_client
-
-from src.chunking import ChunkStrategy, chunk_text
+from src.routers.completions import request_llm, CompletionRequest
+from src.routers.embed import embed_text_handler, EmbedRequest
+from src.routers.search import search_qdrant, SearchRequest
+from src.routers.rag import rag_endpoint, RagRequest
+from src.routers.evaluate import evaluate, EvalRequest
+from src.routers.api_keys import create_api_key, CreateApiKeyRequest
+from src.services.auth_dependency import require_api_key, require_admin_secret
 
 load_dotenv()
 
 logger = logging.getLogger("uvicorn.error")
 
-JUDGE_MODEL = "cerebras/gemma-4-31b"
 
-
-# Lifespan context to ensure our table exists on startup
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Application startup and shutdown lifecycle."""
+    # Database initialization
     async with engine.begin() as conn:
-        # In production, swap this for Alembic migrations
         await conn.run_sync(Base.metadata.create_all)
 
-        collection_name = "embeddings"
-        try:
-            exists = await qdrant_client.collection_exists(collection_name)
-            if not exists:
-                await qdrant_client.create_collection(
-                    collection_name=collection_name,
-                    vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
-                )
-                logger.info(f"Created Qdrant collection: {collection_name}")
-            else:
-                logger.info(f"Qdrant collection '{collection_name}' already exists.")
-        except Exception as e:
-            logger.error(f"Failed to connect to Qdrant: {str(e)}")
+    # Qdrant collection setup
+    collection_name = "embeddings"
+    try:
+        exists = await qdrant_client.collection_exists(collection_name)
+        if not exists:
+            await qdrant_client.create_collection(
+                collection_name=collection_name,
+                vectors_config={
+                    "dense": VectorParams(size=1536, distance=Distance.COSINE)
+                },
+                sparse_vectors_config={"sparse": SparseVectorParams()},
+            )
+            logger.info(f"Created Qdrant collection: {collection_name}")
+        else:
+            logger.info(f"Qdrant collection '{collection_name}' already exists.")
+    except Exception as e:
+        logger.error(f"Failed to connect to Qdrant: {str(e)}")
 
-        try:
-            await redis_client.ping()
-            logger.info("Connected to Redis cache.")
-        except Exception as e:
-            logger.error(f"Failed to connect Redis: {str(e)}")
+    # Redis connection check
+    try:
+        await redis_client.ping()
+        logger.info("Connected to Redis cache.")
+    except Exception as e:
+        logger.error(f"Failed to connect Redis: {str(e)}")
 
+    # NLTK punkt tokenizer
     for resource in ("tokenizers/punkt_tab", "tokenizers/punkt"):
         try:
             nltk.data.find(resource)
             break
         except LookupError:
             continue
-
     else:
         try:
             nltk.download("punkt_tab", quiet=True)
         except Exception as e:
             logger.error(f"Failed to download nltk punkt_tab: {str(e)}")
 
-    try:
-        get_reranker()
-        logger.info("Cross encoder reranker loaded.")
-    except Exception as e:
-        logger.error(f"Failed to load reranker {str(e)}")
-
+    # Reranker initialization
     if os.getenv("PRELOAD_RERANKER", "false").lower() == "true":
         try:
             get_reranker()
-            logger.info("Cross Encoder loaded.")
+            logger.info("Cross Encoder reranker loaded.")
         except Exception as e:
-            logger.error(f"Failed to load the Cross Encode reranker: {str(e)}")
+            logger.error(f"Failed to load reranker: {str(e)}")
     else:
         logger.info(
             "Skipping reranker preload (PRELOAD_RERANKER not set to true). "
             "It will load lazily on first use."
         )
+
     yield
 
 
 app = FastAPI(lifespan=lifespan)
 
-CACHE_TTL_SECONDS = 24 * 60 * 60
 
-
-def make_cache_key(question: str) -> str:
-    digest = hashlib.sha256(question.encode("utf-8")).hexdigest()
-    return f"rag: {digest}"
-
-
-class CompletionRequest(BaseModel):
-    prompt: str
-    model: str = "groq/llama-3.3-70b-versatile"
-    max_tokens: int = 500
-
-
-class EmbedRequest(BaseModel):
-    text: str
-    strategy: ChunkStrategy = ChunkStrategy.PARAGRAPH
-    source: str = "api_upload"
-
-
-class SearchRequest(BaseModel):
-    query: str
-    top_k: int = 5
-
-
-class RagRequest(BaseModel):
-    question: str
-
-
-class EvalQuestion(BaseModel):
-    question: str
-    expected: str
-
-
-class EvalRequest(BaseModel):
-    questions: list[EvalQuestion]
-
-
-def _extract_cost(response) -> float:
-    try:
-        return litellm.completion_cost(completion_response=response)
-    except Exception:
-        return 0.00
-
-
-async def _rag_run_pipeline(question: str) -> dict:
-    t0 = time.time()
-
-    emb_response = await aembedding(
-        model="gemini/gemini-embedding-001", input=[question], dimensions=1536
-    )
-
-    query_vector = emb_response.data[0].embedding
-
-    search_result = await qdrant_client.query_points(
-        collection_name="embeddings",
-        query=query_vector,
-        limit=RERANK_CANDIDATES_K,
-        with_payload=True,
-    )
-
-    candidate_hits = [hit for hit in search_result.points if hit.payload.get("text")]
-    candidate_texts = [hit.payload["text"] for hit in candidate_hits]
-
-    reranked = rerank(question, candidate_texts, top_k=5)
-
-    contexts, sources = [], []
-
-    for orig_idx, rerank_score in reranked:
-        hit = candidate_hits[orig_idx]
-        text = hit.payload["text"]
-        contexts.append(text)
-        sources.append(
-            {
-                "id": str(hit.id),
-                "vector_score": hit.score,
-                "rerank_score": rerank_score,
-                "text": text,
-            }
-        )
-
-    # 4. Generate answer
-    context_string = "\n\n---\n\n".join(contexts)
-    system_prompt = (
-        "Answer using only the provided context. "
-        "If the answer is not in the context, say so."
-    )
-    user_prompt = f"Context:\n{context_string}\n\nQuestion:\n{question}"
-
-    llm_response = await acompletion(
-        model="groq/llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-
-    answer = llm_response.choices[0].message.content
-    latency_ms = int((time.time() - t0) * 1000)
-    llm_cost = _extract_cost(llm_response)
-
-    return {
-        "answer": answer,
-        "sources": sources,
-        "latency_ms": latency_ms,
-        "llm_cost_usd": llm_cost,
-    }
-
-
-async def _judge_answer(question: str, expected: str, actual: str) -> tuple[int, float]:
-    prompt = (
-        "You are a strict answer evaluator for a RAG system.\n\n"
-        f"Question: {question}\n"
-        f"Expected answer: {expected}\n"
-        f"Actual answer: {actual}\n\n"
-        "Does the actual answer correctly address the question with the same "
-        "key information as the expected answer?\n\n"
-        "Reply with ONLY the digit 1 (correct) or 0 (incorrect). "
-        "No explanation, no punctuation — just the digit."
-    )
-
-    response = await acompletion(
-        model=JUDGE_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=64,
-    )
-
-    logger.info(response)
-
-    content = response.choices[0].message.content
-
-    if content is None:
-        raise RuntimeError(f"Judge returned no content: {response}")
-
-    raw = content.strip()
-
-    score = next((int(c) for c in raw if c in "01"), 0)
-    cost = _extract_cost(response)
-
-    return score, cost
+@app.exception_handler(FastAPIHTTPException)
+async def http_exception_handler(request: Request, exc: FastAPIHTTPException):
+    """Return raw {"error": ...} bodies for auth failures; fall back to
+    the default {"detail": ...} envelope for everything else."""
+    if isinstance(exc.detail, dict) and "error" in exc.detail:
+        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
 @app.get("/")
 async def root():
-    return {"Message": "Hello from the root"}
+    """Root endpoint."""
+    return {"message": "Hello from RAGEval API"}
 
 
-@app.post("/complete")
-async def request_llm(request: CompletionRequest):
-    start_time = time.time()
-
-    try:
-        response = await acompletion(
-            model=request.model,
-            messages=[{"role": "user", "content": request.prompt}],
-            max_tokens=request.max_tokens,
-            stream=True,
-        )
-
-        async def stream_generator():
-            full_response_text = ""
-            try:
-                async for chunk in response:
-                    content = chunk.choices[0].delta.content
-                    if content:
-                        full_response_text += content
-                        yield content
-            except Exception as stream_err:
-                logger.error(f"Stream interrupted: {str(stream_err)}", exc_info=True)
-                yield f"\n[Error: Stream Interrupted]"
-            finally:
-                # Observability: Calculate latency and save to database
-                latency_ms = int((time.time() - start_time) * 1000)
-
-                # Open a new session locally so it survives the streaming process
-                async with AsyncSessionLocal() as session:
-                    completion_log = Completion(
-                        prompt=request.prompt,
-                        response=full_response_text,
-                        model=request.model,
-                        latency_ms=latency_ms,
-                    )
-                    session.add(completion_log)
-                    await session.commit()
-
-        return StreamingResponse(stream_generator(), media_type="text/plain")
-
-    except APIError as api_err:
-        logger.error(
-            f"Groq API Error: {api_err.message} (Status Code: {api_err.status_code})"
-        )
-        raise HTTPException(
-            status_code=api_err.status_code, detail=f"LLM API Error: {api_err.message}"
-        )
-
-    except APIConnectionError as conn_err:
-        logger.error(f"LLM Connection Error: {str(conn_err)}")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Could not reach LLM.",
-        )
-
-    except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An unexpected internal server error occurred.",
-        )
+@app.post("/api-keys", dependencies=[Depends(require_admin_secret)])
+async def api_keys_endpoint(request: CreateApiKeyRequest):
+    """Generate a new API key. Unauthenticated by design (bootstrap)."""
+    return await create_api_key(request)
 
 
-@app.post("/embed")
-async def embed_text(request: EmbedRequest):
-    try:
-        chunks = chunk_text(request.text, request.strategy)
-
-        if not chunks:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No content to embed after chunking (maybe input is empty).",
-            )
-
-        embedding_response = await aembedding(
-            model="gemini/gemini-embedding-001", input=chunks, dimensions=1536
-        )
-
-        points = []
-        chunk_rows = []
-
-        for idx, (chunk_text_value, emb_item) in enumerate(
-            zip(chunks, embedding_response.data)
-        ):
-            point_id = str(uuid.uuid4())
-
-            points.append(
-                PointStruct(
-                    id=point_id,
-                    vector=(
-                        emb_item["embedding"]
-                        if isinstance(emb_item, dict)
-                        else emb_item.embedding
-                    ),
-                    payload={
-                        "text": chunk_text_value,
-                        "source": request.source,
-                        "strategy": request.strategy.value,
-                        "chunk_index": idx,
-                        "chunk_count": len(chunks),
-                    },
-                )
-            )
-
-            chunk_rows.append(
-                Chunk(
-                    point_id=point_id,
-                    text=chunk_text_value,
-                    strategy=request.strategy.value,
-                    chunk_index=idx,
-                    source=request.source,
-                )
-            )
-
-        await qdrant_client.upsert(collection_name="embeddings", points=points)
-
-        async with AsyncSessionLocal() as session:
-            session.add_all(chunk_rows)
-            await session.commit()
-
-        return {
-            "status": "success",
-            "strategy": request.strategy.value,
-            "chunk_count": len(chunks),
-            "point_ids": [p.id for p in points],
-            "message": (
-                f"Text split into {len(chunks)} chunk(s) using "
-                f"'{request.strategy.value}' strategy, embedded via Gemini, "
-                "and indexed in Qdrant."
-            ),
-        }
-
-    except HTTPException:
-        raise
-
-    except Exception as e:
-        logger.error(f"Failed to process vector embedding: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while computing or saving vector representation.",
-        )
+@app.post("/complete", dependencies=[Depends(require_api_key)])
+async def completion_endpoint(request: CompletionRequest):
+    """Generate LLM completions with streaming support."""
+    return await request_llm(request)
 
 
-@app.post("/search")
-async def search_qdrant(request: SearchRequest):
-    try:
-        embedding_response = await aembedding(
-            model="gemini/gemini-embedding-001", input=[request.query], dimensions=1536
-        )
-        query_vector = embedding_response.data[0].embedding
-
-        search_response = await qdrant_client.query_points(
-            collection_name="embeddings",
-            query=query_vector,
-            limit=request.top_k,
-            with_payload=True,
-        )
-
-        formatted_results = [
-            {
-                "id": str(hit.id),
-                "score": hit.score,
-                "text": hit.payload.get("text", "no text found"),
-            }
-            for hit in search_response.points
-        ]
-
-        return {
-            "status": "success",
-            "query": request.query,
-            "results": formatted_results,
-        }
-
-    except Exception as e:
-        logger.error(f"Search failed: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while searching the knowledge base.",
-        )
+@app.post("/embed", dependencies=[Depends(require_api_key)])
+async def embed_endpoint(request: EmbedRequest):
+    """Embed text with chunking strategy."""
+    return await embed_text_handler(request)
 
 
-@app.post("/rag")
-async def rag_endpoint(request: RagRequest):
-    cache_key = make_cache_key(request.question)
-
-    cached = await redis_client.get(cache_key)
-    if cached is not None:
-        logger.info(f"Cache hit for key {cache_key}")
-        return json.loads(cached)
-    try:
-        embedding_response = await aembedding(
-            model="gemini/gemini-embedding-001",
-            input=[request.question],
-            dimensions=1536,
-        )
-
-        query_vector = embedding_response.data[0].embedding
-
-        search_result = await qdrant_client.query_points(
-            collection_name="embeddings",
-            query=query_vector,
-            limit=RERANK_CANDIDATES_K,
-            with_payload=True,
-        )
-
-        candidate_hits = [
-            hit for hit in search_result.points if hit.payload.get("text")
-        ]
-
-        candidate_texts = [hit.payload["text"] for hit in candidate_hits]
-
-        reranked = rerank(request.question, candidate_texts, top_k=5)
-
-        contexts = []
-        sources = []
-
-        for original_idx, rerank_score in reranked:
-            hit = candidate_hits[original_idx]
-            text = hit.payload["text"]
-            contexts.append(text)
-            sources.append(
-                {
-                    "id": str(hit.id),
-                    "vector_score": hit.score,
-                    "rerank_score": rerank_score,
-                    "text": text,
-                }
-            )
-
-        # for hit in search_result.points:
-        #     text = hit.payload.get("text")
-        #     if text:
-        #         contexts.append(text)
-        #         sources.append({"id": str(hit.id), "score": hit.score, "text": text})
-
-        context_string = "\n\n---\n\n".join(contexts)
-
-        system_prompt = "Answer using only the provided context. If the answer is not in the context, say so."
-        user_prompt = f"Context: \n{context_string}\n\nQuestion:\n{request.question}"
-
-        completion_response = await acompletion(
-            model="groq/llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-
-        # logger.info(f"LLM Full Response: {completion_response}")
-
-        answer = completion_response.choices[0].message.content
-
-        result = {
-            "status": "success",
-            "question": request.question,
-            "answer": answer,
-            "sources": sources,
-        }
-
-        await redis_client.set(cache_key, json.dumps(result), ex=CACHE_TTL_SECONDS)
-
-        return result
-
-    except Exception as e:
-        logger.error(f"RAG failed: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500, detail="An error occurred during the RAG process."
-        )
+@app.post("/search", dependencies=[Depends(require_api_key)])
+async def search_endpoint(request: SearchRequest):
+    """Search for similar documents in the vector store."""
+    return await search_qdrant(request)
 
 
-EVAL_CONCURRENCY = 30
+@app.post("/rag", dependencies=[Depends(require_api_key)])
+async def rag_query_endpoint(request: RagRequest):
+    """Run RAG pipeline to answer questions."""
+    return await rag_endpoint(request)
 
 
-async def _evaluate_one(item: EvalRequest, semaphore: asyncio.Semaphore) -> dict:
-    async with semaphore:
-        logger.info(f"[evaluate] Running: {item.question[:60]}...")
-        try:
-            # 1. Run the full RAG pipeline (no cache)
-            rag = await _rag_run_pipeline(item.question)
-
-            score, judge_cost = await _judge_answer(
-                item.question, item.expected, rag["answer"]
-            )
-
-            return {
-                "question": item.question,
-                "expected": item.expected,
-                "actual": rag["answer"],
-                "score": score,
-                "latency_ms": rag["latency_ms"],
-                "sources_used": len(rag["sources"]),
-                "llm_cost_usd": rag["llm_cost_usd"],
-                "judge_cost_usd": judge_cost,
-            }
-
-        except Exception as e:
-            logger.error(
-                f"[evaluate] Failed on '{item.question[:60]}': {e}", exc_info=True
-            )
-            # Count failed questions as score 0 so accuracy is not inflated
-            return {
-                "question": item.question,
-                "expected": item.expected,
-                "actual": "",
-                "score": 0,
-                "latency_ms": 0,
-                "sources_used": 0,
-                "llm_cost_usd": 0.0,
-                "judge_cost_usd": 0.0,
-                "error": str(e),
-            }
-
-
-@app.post("/evaluate")
-async def evaluate(request: EvalRequest):
-    if not request.questions:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Provide at least one question.",
-        )
-
-    try:
-        # CHANGED: was a sequential `for item in request.questions:` loop with
-        # `await` on each iteration. Now schedules all questions at once and
-        # lets asyncio.gather() drive them concurrently, throttled to
-        # EVAL_CONCURRENCY in-flight at a time by the semaphore inside
-        # _evaluate_one().
-        batch_start = time.time()
-        semaphore = asyncio.Semaphore(EVAL_CONCURRENCY)
-        results = await asyncio.gather(
-            *[_evaluate_one(item, semaphore) for item in request.questions]
-        )
-        batch_wall_time_ms = int((time.time() - batch_start) * 1000)
-
-        total_latency_ms = sum(r["latency_ms"] for r in results)
-        total_llm_cost = sum(r["llm_cost_usd"] for r in results)
-        total_judge_cost = sum(r["judge_cost_usd"] for r in results)
-
-        n = len(results)
-        passed = sum(r["score"] for r in results)
-        failed = n - passed
-
-        return {
-            "accuracy": round(passed / n, 3),
-            "average_latency_ms": round(total_latency_ms / n, 1),
-            # CHANGED: new field - actual wall-clock time for the whole batch,
-            # which is what the concurrency change is meant to improve.
-            # average_latency_ms above is unchanged in meaning (mean per-question
-            # pipeline latency); batch_wall_time_ms is the new number that shows
-            # the speedup from parallelizing.
-            "batch_wall_time_ms": batch_wall_time_ms,
-            "eval_concurrency": EVAL_CONCURRENCY,
-            "total_cost_usd": round(total_llm_cost + total_judge_cost, 6),
-            "cost_breakdown": {
-                "llm_cost_usd": round(total_llm_cost, 6),
-                "judge_cost_usd": round(total_judge_cost, 6),
-            },
-            "total_questions": n,
-            "passed": passed,
-            "failed": failed,
-            "judge_model": JUDGE_MODEL,
-            "results": results,
-        }
-
-    # NEW: catch-all so the client always gets a diagnosable JSON error
-    # instead of Starlette's generic text/plain 500 page. The full
-    # traceback still goes to the server logs via exc_info=True.
-    except Exception as e:
-        logger.error(f"[evaluate] Batch evaluation failed: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Evaluation batch failed: {str(e)}",
-        )
+@app.post("/evaluate", dependencies=[Depends(require_api_key)])
+async def evaluate_endpoint(request: EvalRequest):
+    """Evaluate RAG system on a set of questions."""
+    return await evaluate(request)

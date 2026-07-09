@@ -1,3 +1,5 @@
+"""Redis cache client initialization."""
+
 import os
 import redis.asyncio as redis
 
