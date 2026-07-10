@@ -4,6 +4,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
+
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+
 from dotenv import load_dotenv
 import logging
 
@@ -18,6 +22,7 @@ from src.routers.search import search_qdrant, SearchRequest
 from src.routers.rag import rag_endpoint, RagRequest
 from src.routers.evaluate import evaluate, EvalRequest
 from src.routers.api_keys import create_api_key, CreateApiKeyRequest
+from src.services.rate_limiter import limiter, log_rate_limit_hit
 from src.services.auth_dependency import require_api_key, require_admin_secret
 
 load_dotenv()
@@ -88,6 +93,22 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """Return 429 with Retry-After, and log the hit to PostgreSQL."""
+    await log_rate_limit_hit(request)
+    retry_after = getattr(exc, "retry_after", 3600)
+
+    return JSONResponse(
+        status_code=429,
+        content={"error": "Rate limit exceeded. Try again later."},
+        headers={"Retry-After": str(retry_after)},
+    )
+
 
 @app.exception_handler(FastAPIHTTPException)
 async def http_exception_handler(request: Request, exc: FastAPIHTTPException):
@@ -111,30 +132,35 @@ async def api_keys_endpoint(request: CreateApiKeyRequest):
 
 
 @app.post("/complete", dependencies=[Depends(require_api_key)])
-async def completion_endpoint(request: CompletionRequest):
+@limiter.limit("60/hour")
+async def completion_endpoint(request: Request, body: CompletionRequest):
     """Generate LLM completions with streaming support."""
-    return await request_llm(request)
+    return await request_llm(body)
 
 
 @app.post("/embed", dependencies=[Depends(require_api_key)])
-async def embed_endpoint(request: EmbedRequest):
+@limiter.limit("60/hour")
+async def embed_endpoint(request: Request, body: EmbedRequest):
     """Embed text with chunking strategy."""
-    return await embed_text_handler(request)
+    return await embed_text_handler(body)
 
 
 @app.post("/search", dependencies=[Depends(require_api_key)])
-async def search_endpoint(request: SearchRequest):
+@limiter.limit("60/hour")
+async def search_endpoint(request: Request, body: SearchRequest):
     """Search for similar documents in the vector store."""
-    return await search_qdrant(request)
+    return await search_qdrant(body)
 
 
 @app.post("/rag", dependencies=[Depends(require_api_key)])
-async def rag_query_endpoint(request: RagRequest):
+@limiter.limit("60/hour")
+async def rag_query_endpoint(request: Request, body: RagRequest):
     """Run RAG pipeline to answer questions."""
-    return await rag_endpoint(request)
+    return await rag_endpoint(body)
 
 
 @app.post("/evaluate", dependencies=[Depends(require_api_key)])
-async def evaluate_endpoint(request: EvalRequest):
+@limiter.limit("60/hour")
+async def evaluate_endpoint(request: Request, body: EvalRequest):
     """Evaluate RAG system on a set of questions."""
-    return await evaluate(request)
+    return await evaluate(body)

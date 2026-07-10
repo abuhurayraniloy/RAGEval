@@ -50,3 +50,14 @@ class ApiKey(Base):
         DateTime(timezone=True), nullable=True
     )
     revoked: Mapped[bool] = mapped_column(default=False)
+
+
+class RateLimitHit(Base):
+    __tablename__ = "rate_limit_hits"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    api_key_prefix: Mapped[str] = mapped_column(String(12), index=True)
+    endpoint: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
