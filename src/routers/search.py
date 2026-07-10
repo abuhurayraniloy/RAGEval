@@ -4,7 +4,12 @@ import logging
 from fastapi import HTTPException, status
 from pydantic import BaseModel
 
-from src.services.embeddings import embed_text
+from src.services.embeddings import (
+    embed_text,
+    embed_texts,
+    embed_sparse_batch,
+    embed_sparse,
+)
 from src.services.retrieval import search_hybrid
 
 logger = logging.getLogger("uvicorn.error")
@@ -26,9 +31,11 @@ async def search_qdrant(request: SearchRequest):
     """
     try:
         query_vector = await embed_text(request.query)
+        query_sparse = embed_sparse(request.query)
 
         search_results = await search_hybrid(
             query_vector=query_vector,
+            query_sparse=query_sparse,
             collection_name="embeddings",
             limit=request.top_k,
         )

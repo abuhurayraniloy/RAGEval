@@ -9,6 +9,14 @@ Exposes:
 """
 
 from src.db.session import engine, AsyncSessionLocal
-from src.db.models import Base, Completion, Chunk, ApiKey
+from src.db.models import Base, Completion, Chunk, ApiKey, RateLimitHit
 
-__all__ = ["engine", "AsyncSessionLocal", "Base", "Completion", "Chunk", "ApiKey"]
+__all__ = [
+    "engine",
+    "AsyncSessionLocal",
+    "Base",
+    "Completion",
+    "Chunk",
+    "ApiKey",
+    "RateLimitHit",
+]
