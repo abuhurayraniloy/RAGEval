@@ -29,6 +29,8 @@ RUN uv run python -c "import nltk; nltk.download('punkt_tab', quiet=True)"
 
 # 7. Copy your actual application source code
 COPY src/ src/
+COPY alembic/ alembic/
+COPY alembic.ini .
 
 # 8. Start your production Uvicorn web server
-CMD ["sh", "-c", "uv run uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "uv run alembic upgrade head && uv run uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

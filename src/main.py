@@ -34,8 +34,8 @@ logger = logging.getLogger("uvicorn.error")
 async def lifespan(app: FastAPI):
     """Application startup and shutdown lifecycle."""
     # Database initialization
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # async with engine.begin() as conn:
+    #     await conn.run_sync(Base.metadata.create_all)
 
     # Qdrant collection setup
     collection_name = "embeddings"
