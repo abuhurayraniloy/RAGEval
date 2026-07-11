@@ -20,7 +20,9 @@ config = context.config
 # runs inside the app container.
 config.set_main_option(
     "sqlalchemy.url",
-    os.getenv("DATABASE_URL", "postgresql+asyncpg://user:password@db:5432/rageval_logs"),
+    os.getenv(
+        "DATABASE_URL", "postgresql+asyncpg://user:password@db:5432/rageval_logs"
+    ),
 )
 
 if config.config_file_name is not None:
