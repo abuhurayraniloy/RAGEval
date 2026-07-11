@@ -17,6 +17,7 @@ class Completion(Base):
     response: Mapped[str] = mapped_column(Text)
     model: Mapped[str] = mapped_column(String(100))
     latency_ms: Mapped[int] = mapped_column(Integer)
+    session_id: Mapped[str] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

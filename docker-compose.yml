@@ -43,6 +43,8 @@ services:
       - redis
     volumes:
       - ./src:/app/src
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
 
 volumes:
   postgres_data:
