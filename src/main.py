@@ -1,7 +1,7 @@
 import os
 import nltk
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, Request
+from fastapi import FastAPI, Depends, Request, BackgroundTasks, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 
@@ -24,6 +24,9 @@ from src.routers.evaluate import evaluate, EvalRequest
 from src.routers.api_keys import create_api_key, CreateApiKeyRequest
 from src.services.rate_limiter import limiter, log_rate_limit_hit
 from src.services.auth_dependency import require_api_key, require_admin_secret
+
+from src.routers.ingest import ingest_pdf
+from src.routers.documents import get_document_status
 
 load_dotenv()
 
@@ -164,3 +167,18 @@ async def rag_query_endpoint(request: Request, body: RagRequest):
 async def evaluate_endpoint(request: Request, body: EvalRequest):
     """Evaluate RAG system on a set of questions."""
     return await evaluate(body)
+
+
+@app.post("/ingest", dependencies=[Depends(require_api_key)])
+@limiter.limit("60/hour")
+async def ingest_endpoint(
+    request: Request, file: UploadFile, background_tasks: BackgroundTasks
+):
+    """Ingest a PDF: extract, chunk, embed, and index in the background."""
+    return await ingest_pdf(file, background_tasks)
+
+
+@app.get("/documents/{document_id}", dependencies=[Depends(require_api_key)])
+async def document_status_endpoint(request: Request, document_id: str):
+    """Check ingestion status for a previously uploaded document."""
+    return await get_document_status(document_id)

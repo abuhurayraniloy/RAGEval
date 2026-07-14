@@ -13,3 +13,5 @@ wheels/
 uvicorn.*
 
 CODEBASE.*
+
+graphify-out/
