@@ -172,13 +172,13 @@ async def evaluate_endpoint(request: Request, body: EvalRequest):
 @app.post("/ingest", dependencies=[Depends(require_api_key)])
 @limiter.limit("60/hour")
 async def ingest_endpoint(
-	request: Request, file: UploadFile, background_tasks: BackgroundTasks
+    request: Request, file: UploadFile, background_tasks: BackgroundTasks
 ):
-	"""Ingest a PDF: extract, chunk, embed, and index in the background."""
-	return await ingest_pdf(file, background_tasks)
+    """Ingest a PDF: extract, chunk, embed, and index in the background."""
+    return await ingest_pdf(file, background_tasks)
 
 
 @app.get("/documents/{document_id}", dependencies=[Depends(require_api_key)])
 async def document_status_endpoint(request: Request, document_id: str):
-	"""Check ingestion status for a previously uploaded document."""
-	return await get_document_status(document_id)
+    """Check ingestion status for a previously uploaded document."""
+    return await get_document_status(document_id)
