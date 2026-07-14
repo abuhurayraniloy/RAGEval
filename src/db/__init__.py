@@ -6,10 +6,13 @@ Exposes:
 - Base: SQLAlchemy declarative base for ORM models
 - Completion: Completion ORM model
 - Chunk: Chunk ORM model
+- ApiKey: API key ORM model
+- RateLimitHit: Rate limit log ORM model
+- Document: Document ingestion status ORM model
 """
 
 from src.db.session import engine, AsyncSessionLocal
-from src.db.models import Base, Completion, Chunk, ApiKey, RateLimitHit
+from src.db.models import Base, Completion, Chunk, ApiKey, RateLimitHit, Document
 
 __all__ = [
     "engine",
@@ -19,4 +22,5 @@ __all__ = [
     "Chunk",
     "ApiKey",
     "RateLimitHit",
+    "Document",
 ]

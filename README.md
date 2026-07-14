@@ -5,9 +5,9 @@
 [![Qdrant](https://img.shields.io/badge/Qdrant-vector%20search-FF4F64)](https://qdrant.tech/)
 [![Redis](https://img.shields.io/badge/Redis-cache-DC382D?logo=redis&logoColor=white)](https://redis.io/)
 
-RAGEval is a modular FastAPI service for RAG workflows. It chunks text, generates dense and sparse embeddings, stores vectors in Qdrant, reranks retrieved candidates, answers with context, caches repeated questions, and logs operational data to PostgreSQL.
+RAGEval is a FastAPI service for RAG workflows. It chunks text, generates dense and sparse embeddings, stores vectors in Qdrant, reranks retrieved candidates, answers with context, caches repeated questions, and logs operational data to PostgreSQL.
 
-## Table of Contents
+## Contents
 
 - [Overview](#overview)
 - [Features](#features)
@@ -33,6 +33,7 @@ The app is built for practical RAG iteration rather than a toy demo. It exposes 
 - reranked RAG answers with source snippets
 - cached RAG responses for repeated questions
 - batch evaluation of question/answer sets using an LLM judge
+- API key minting for bootstrap and local development
 
 Completion telemetry, chunk metadata, API keys, and rate-limit hits go to PostgreSQL. Embeddings are stored in Qdrant, and RAG responses are cached in Redis.
 
@@ -324,47 +325,6 @@ Request:
 
 The response returns the full API key once, along with its id and prefix. Store the key securely because it is not shown again.
 
-## Project Structure
-
-```text
-src/
-|-- main.py
-|-- chunking/
-|   `-- strategies.py
-|-- clients/
-|   |-- qdrant.py
-|   `-- redis_client.py
-|-- db/
-|   |-- models.py
-|   `-- session.py
-|-- routers/
-|   |-- api_keys.py
-|   |-- completions.py
-|   |-- embed.py
-|   |-- evaluate.py
-|   |-- rag.py
-|   `-- search.py
-`-- services/
-    |-- auth.py
-    |-- auth_dependency.py
-    |-- cache.py
-    |-- embeddings.py
-    |-- generation.py
-    |-- judge.py
-    |-- rag_pipeline.py
-    |-- rate_limiter.py
-    |-- reranking.py
-    `-- retrieval.py
-```
-
-## Implementation Notes
-
-- Chunking strategies are `fixed`, `sentence`, and `paragraph`.
-- The reranker is `cross-encoder/ms-marco-MiniLM-L-6-v2`.
-- The judge model is `cerebras/gemma-4-31b`.
-- RAG cache keys are SHA-256 hashes of the question with a 24 hour TTL.
-- The app uses PostgreSQL models for completions, chunks, API keys, and rate-limit hits.
-
 ## Development
 
 Run the test suite:
@@ -416,3 +376,12 @@ python evals/eval_reranking.py --base-url http://localhost:8000
 ├── docker-compose.yml
 └── pyproject.toml
 ```
+
+## Implementation Notes
+
+- Chunking strategies are `fixed`, `sentence`, and `paragraph`.
+- The reranker is `cross-encoder/ms-marco-MiniLM-L-6-v2`.
+- The judge model is `cerebras/gemma-4-31b`.
+- RAG cache keys are SHA-256 hashes of the question with a 24 hour TTL.
+- The app uses PostgreSQL models for completions, chunks, API keys, and rate-limit hits.
+- The app creates the `embeddings` Qdrant collection on startup and downloads the NLTK punkt tokenizer data when needed.
