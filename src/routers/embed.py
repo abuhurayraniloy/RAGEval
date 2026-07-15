@@ -1,6 +1,7 @@
 """Text embedding endpoint."""
 
 import uuid
+import datetime
 import logging
 from fastapi import HTTPException, status
 from pydantic import BaseModel
@@ -18,6 +19,7 @@ class EmbedRequest(BaseModel):
     text: str
     strategy: ChunkStrategy = ChunkStrategy.PARAGRAPH
     source: str = "api_upload"
+    category: str = "general"
 
 
 async def embed_text_handler(request: EmbedRequest):
@@ -43,6 +45,8 @@ async def embed_text_handler(request: EmbedRequest):
         dense_vectors = await embed_texts(chunks)
         sparse_vectors = embed_sparse_batch(chunks)
 
+        created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
         points = []
         chunk_rows = []
 
@@ -63,6 +67,8 @@ async def embed_text_handler(request: EmbedRequest):
                     payload={
                         "text": chunk_text_value,
                         "source": request.source,
+                        "category": request.category,
+                        "date": created_at,
                         "strategy": request.strategy.value,
                         "chunk_index": idx,
                         "chunk_count": len(chunks),
@@ -89,6 +95,7 @@ async def embed_text_handler(request: EmbedRequest):
         return {
             "status": "success",
             "strategy": request.strategy.value,
+            "category": request.category,
             "chunk_count": len(chunks),
             "point_ids": [p.id for p in points],
             "message": (
