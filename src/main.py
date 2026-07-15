@@ -14,7 +14,12 @@ import logging
 from src.db import engine, Base
 from src.clients import qdrant_client, redis_client
 from src.services.reranking import get_reranker
-from qdrant_client.models import Distance, VectorParams, SparseVectorParams
+from qdrant_client.models import (
+    Distance,
+    VectorParams,
+    SparseVectorParams,
+    PayloadSchemaType,
+)
 
 from src.routers.completions import request_llm, CompletionRequest
 from src.routers.embed import embed_text_handler, EmbedRequest
@@ -55,6 +60,23 @@ async def lifespan(app: FastAPI):
             logger.info(f"Created Qdrant collection: {collection_name}")
         else:
             logger.info(f"Qdrant collection '{collection_name}' already exists.")
+
+        # Payload indexes required for metadata filtering (e.g. /search's
+        # {"category": "technical"} filter). Qdrant rejects filter queries
+        # on any field that doesn't have an index, even if the field exists
+        # in every point's payload.
+        await qdrant_client.create_payload_index(
+            collection_name=collection_name,
+            field_name="category",
+            field_schema=PayloadSchemaType.KEYWORD,
+        )
+        await qdrant_client.create_payload_index(
+            collection_name=collection_name,
+            field_name="source",
+            field_schema=PayloadSchemaType.KEYWORD,
+        )
+        logger.info("Ensured payload indexes on 'category' and 'source'.")
+
     except Exception as e:
         logger.error(f"Failed to connect to Qdrant: {str(e)}")
 

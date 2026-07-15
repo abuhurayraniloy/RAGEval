@@ -18,6 +18,7 @@ logger = logging.getLogger("uvicorn.error")
 class SearchRequest(BaseModel):
     query: str
     top_k: int = 5
+    filter: dict | None = None
 
 
 async def search_qdrant(request: SearchRequest):
@@ -38,6 +39,7 @@ async def search_qdrant(request: SearchRequest):
             query_sparse=query_sparse,
             collection_name="embeddings",
             limit=request.top_k,
+            filters=request.filter,
         )
 
         formatted_results = [
@@ -45,6 +47,8 @@ async def search_qdrant(request: SearchRequest):
                 "id": result["id"],
                 "score": result["score"],
                 "text": result["text"],
+                "category": result["payload"].get("category"),
+                "source": result["payload"].get("source"),
             }
             for result in search_results
         ]
@@ -52,6 +56,7 @@ async def search_qdrant(request: SearchRequest):
         return {
             "status": "success",
             "query": request.query,
+            "filter": request.filter,
             "results": formatted_results,
         }
 
