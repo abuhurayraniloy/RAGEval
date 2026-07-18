@@ -78,3 +78,25 @@ class Document(Base):
     completed_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class ConversationMessage(Base):
+    __tablename__ = "converstion_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    conversation_id: Mapped[str] = mapped_column(String(36), index=True)
+    role: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
+class ConversationSummary(Base):
+    __tablename__ = "conversation_summaries"
+
+    conversation_id: Mapped[id] = mapped_column(String(36), primary_key=True)
+    summary: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
