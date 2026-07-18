@@ -12,7 +12,16 @@ Exposes:
 """
 
 from src.db.session import engine, AsyncSessionLocal
-from src.db.models import Base, Completion, Chunk, ApiKey, RateLimitHit, Document
+from src.db.models import (
+    Base,
+    Completion,
+    Chunk,
+    ApiKey,
+    RateLimitHit,
+    Document,
+    ConversationMessage,
+    ConversationSummary,
+)
 
 __all__ = [
     "engine",
@@ -23,4 +32,6 @@ __all__ = [
     "ApiKey",
     "RateLimitHit",
     "Document",
+    "ConversationMessage",
+    "ConversationSummary",
 ]
