@@ -10,6 +10,9 @@ Structure:
   3. A loop: call the LLM, check if it requested a tool call, run the tool
      locally, feed the result back as a new message, repeat until the LLM
      responds with plain text instead of a tool call.
+  4. Once tool-calling is done, a final structured call (via instructor)
+     forces the answer into a validated AgentResponse Pydantic model
+     instead of returning a raw string.
 
 Conversation memory: every message is persisted to PostgreSQL via
 evals.memory. Each call to run_agent_turn loads the last 10 messages (plus
@@ -37,15 +40,46 @@ import time
 import uuid
 
 import httpx
+import instructor
 from dotenv import load_dotenv
 from litellm import completion
 from litellm.exceptions import BadRequestError, RateLimitError
+from pydantic import BaseModel, Field
 
 from evals.memory import build_context, save_message, maybe_summarize
 
 load_dotenv()
 
 MODEL = "groq/llama-3.1-8b-instant"
+
+# Patch LiteLLM's completion function with instructor. This gives us an
+# optional response_model=... argument on chat.completions.create(), which
+# forces the model's output into a validated Pydantic model instead of a
+# raw string - retrying automatically if the model's output doesn't fit.
+instructor_client = instructor.from_litellm(completion)
+
+
+class AgentResponse(BaseModel):
+    """Structured final answer from the agent - typed, not a raw string."""
+
+    answer: str = Field(description="The direct answer to the user's question.")
+    confidence: float = Field(
+        description="Confidence in this answer, from 0.0 (pure guess) to 1.0 (certain).",
+        ge=0.0,
+        le=1.0,
+    )
+    sources: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Any sources used to arrive at the answer (e.g. knowledge base "
+            "excerpts, or 'calculation' for computed results). Empty list "
+            "if answered from general knowledge with no tool use."
+        ),
+    )
+    reasoning: str = Field(
+        description="A brief explanation of how the answer was reached."
+    )
+
 
 SYSTEM_PROMPT = """You are a helpful research assistant with access to tools.
 
@@ -212,7 +246,7 @@ def _extract_retry_seconds(error_message: str, default: float = 6.0) -> float:
     return default
 
 
-def call_llm_with_retry(messages: list, max_retries: int = 3):
+def call_llm_with_retry(messages: list, max_retries: int = 5):
     """Call the LLM with tool calling, retrying on:
     - malformed tool-call errors (an occasional Groq native tool-calling
       quirk), retried immediately, and
@@ -247,7 +281,7 @@ def call_llm_with_retry(messages: list, max_retries: int = 3):
     raise last_error
 
 
-# --- The agent loop, with persisted memory --------------------------------
+# --- The agent loop, with persisted memory + structured final output -----
 
 
 async def run_agent_turn(
@@ -257,10 +291,10 @@ async def run_agent_turn(
     api_key: str,
     max_turns: int = 6,
     verbose: bool = True,
-) -> str:
+) -> AgentResponse:
     """Run one conversational turn with persisted memory: load context from
-    PostgreSQL, run the tool-calling loop, save new messages, and summarize
-    older history if it's grown past the token budget.
+    PostgreSQL, run the tool-calling loop, then force the final answer
+    through a validated AgentResponse via instructor before returning.
 
     Args:
             conversation_id: Identifier grouping this turn into a conversation
@@ -271,7 +305,7 @@ async def run_agent_turn(
             verbose: Print each step as it happens
 
     Returns:
-            The agent's final plain-text answer for this turn
+            A validated AgentResponse with answer, confidence, sources, and reasoning
     """
     await save_message(conversation_id, "user", user_message)
 
@@ -282,11 +316,31 @@ async def run_agent_turn(
         message = response.choices[0].message
 
         if not message.tool_calls:
+            # Tool-calling phase is done. Make one more call asking the
+            # model to restate its answer in the required structured shape.
+            messages.append({"role": "assistant", "content": message.content or ""})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Based on everything above, provide your final answer "
+                        "in the required structured format."
+                    ),
+                }
+            )
+
+            structured_answer = instructor_client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                response_model=AgentResponse,
+            )
+
             if verbose:
-                print(f"  [turn {turn + 1}] Final answer.")
-            await save_message(conversation_id, "assistant", message.content)
+                print(f"  [turn {turn + 1}] Final structured answer.")
+
+            await save_message(conversation_id, "assistant", structured_answer.answer)
             await maybe_summarize(conversation_id)
-            return message.content
+            return structured_answer
 
         messages.append(message.model_dump())
 
@@ -307,7 +361,14 @@ async def run_agent_turn(
             )
             await save_message(conversation_id, "tool", f"{name}: {result}")
 
-    return "Max turns reached without a final answer."
+    # Max turns reached without a clean finish - still return a typed
+    # object, not a bare string, so callers never have to special-case this.
+    return AgentResponse(
+        answer="Max turns reached without a final answer.",
+        confidence=0.0,
+        sources=[],
+        reasoning="The tool-calling loop exceeded its maximum allowed turns.",
+    )
 
 
 # --- Standalone test questions (no memory - each is a fresh conversation) --
@@ -346,10 +407,14 @@ async def main():
 
         # Each standalone test question is its own fresh conversation.
         conversation_id = str(uuid.uuid4())
-        answer = await run_agent_turn(
+        result = await run_agent_turn(
             conversation_id, question, args.base_url, args.api_key
         )
-        print(f"\nANSWER: {answer}")
+
+        print(f"\nANSWER:     {result.answer}")
+        print(f"CONFIDENCE: {result.confidence}")
+        print(f"SOURCES:    {result.sources}")
+        print(f"REASONING:  {result.reasoning}")
 
         if i < len(TEST_QUESTIONS):
             time.sleep(3)  # brief pause between questions to ease TPM pressure

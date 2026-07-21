@@ -6,12 +6,17 @@ after enough turns have passed that raw history would normally have
 fallen out of the last-10-messages window - proving the summarization
 path actually works, not just the raw recent-history window.
 
+Now that run_agent_turn returns a structured AgentResponse (answer,
+confidence, sources, reasoning) instead of a raw string, this script
+prints all four fields for each turn.
+
 Usage:
-    python evals/test_conversation_memory.py --base-url http://localhost:8000 --api-key <key>
+    python -m evals.test_conversation_memory --base-url http://localhost:8000 --api-key <key>
 """
 
 import argparse
 import asyncio
+import time
 import uuid
 
 from evals.agent import run_agent_turn
@@ -59,10 +64,17 @@ async def main():
         print(f"Turn {i}: {message}")
         print(f"{'=' * 70}")
 
-        answer = await run_agent_turn(
+        result = await run_agent_turn(
             conversation_id, message, args.base_url, args.api_key, verbose=False
         )
-        print(f"Agent: {answer}\n")
+
+        print(f"Agent:      {result.answer}")
+        print(f"Confidence: {result.confidence:.2f}")
+        print(f"Sources:    {result.sources}")
+        print(f"Reasoning:  {result.reasoning}\n")
+
+        if i < len(CONVERSATION):
+            time.sleep(15)  # give Groq's TPM budget time to refill between turns
 
     print(f"\n{'=' * 70}")
     print("CHECK: Did the final answer correctly recall '42' and 'Aurora'?")
