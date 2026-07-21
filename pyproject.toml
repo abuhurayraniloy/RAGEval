@@ -1,7 +1,7 @@
 [project]
 name = "rageval"
 version = "0.1.0"
-description = "Add your description here"
+description = "Open-source RAG evaluation and serving platform — hybrid retrieval, cross-encoder reranking, LLM-judged evaluation"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [

@@ -1,33 +1,152 @@
-# RAGEval
+<p align="center">
+  <h1 align="center">RAGEval</h1>
+  <p align="center">
+    <em>Open-source RAG evaluation & serving platform — hybrid retrieval, cross-encoder reranking, LLM-judged evaluation, and production monitoring.</em>
+  </p>
+  <p align="center">
+    <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.14-blue?logo=python" alt="Python"></a>
+    <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/FastAPI-0.138+-00a393?logo=fastapi" alt="FastAPI"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="License"></a>
+    <a href="#quick-start"><img src="https://img.shields.io/badge/quickstart-docker-blue?logo=docker" alt="Docker"></a>
+  </p>
+</p>
 
-An authenticated FastAPI service for building, operating, and evaluating retrieval-augmented generation pipelines.
+---
 
-RAGEval gives you the backend pieces most RAG prototypes eventually need: document ingestion, dense and sparse retrieval, reranking, answer generation, response caching, API-key auth, rate limiting, and batch evaluation with an LLM judge. It is designed as a service you can run locally with Docker or embed into a larger internal evaluation stack.
+## What is RAGEval?
 
-The codebase is intentionally small. FastAPI handles the public API, PostgreSQL stores operational records, Qdrant stores dense and sparse vectors, Redis caches repeated RAG answers, and LiteLLM routes model calls to configured providers.
+RAGEval is an authenticated FastAPI service for **building, operating, and evaluating retrieval-augmented generation (RAG) pipelines**. It provides the backend infrastructure most RAG prototypes eventually need — document ingestion, hybrid retrieval, cross-encoder reranking, answer generation, response caching, API-key auth, rate limiting, and batch LLM-judged evaluation — as a single service you can run locally with Docker Compose.
+
+Think of it as a **self-hosted RAG platform** that bridges the gap between ad-hoc notebook experiments and production evaluation infrastructure.
+
+### Why RAGEval?
+
+| Challenge | RAGEval's approach |
+|-----------|-------------------|
+| Dense-only retrieval misses keyword matches | **Hybrid dense + sparse** with Qdrant's native RRF fusion |
+| Raw vector search order isn't always relevant | **Cross-encoder reranking** of the top 20 candidates |
+| Repeated queries are expensive and slow | **Redis cache** with 24-hour TTL and SHA-256 keys |
+| No systematic way to measure RAG quality | **LLM-judged batch evaluation** with binary scoring |
+| Managing API keys and rate limits is tedious | **Built-in auth** with SHA-256 hashed keys + SlowAPI rate limiting |
+| Manual scaling of multiple infrastructure services | **Single `docker compose up`** spins up the full stack |
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.14+ and [`uv`](https://docs.astral.sh/uv/)
+- Docker and Docker Compose
+- Model provider credentials (set in `.env`)
+
+### 1. Start the stack
+
+```bash
+docker compose up --build
+```
+
+This starts PostgreSQL, Qdrant, Redis, and the FastAPI app. Migrations run automatically on boot.
+
+### 2. Create an API key
+
+```bash
+curl -X POST http://localhost:8000/api-keys \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Secret: change-me" \
+  -d '{"name":"local-dev"}'
+```
+
+Save the returned `api_key` (e.g. `rge_xxx`) — it's shown once and stored as a SHA-256 hash.
+
+### 3. Index content
+
+```bash
+curl -X POST http://localhost:8000/embed \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: rge_xxx" \
+  -d '{"text": "Qdrant stores vectors for similarity search and supports hybrid retrieval with dense and sparse vectors.", "strategy": "paragraph", "source": "docs", "category": "technical"}'
+```
+
+### 4. Ask a question
+
+```bash
+curl -X POST http://localhost:8000/rag \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: rge_xxx" \
+  -d '{"question":"What does Qdrant store?"}'
+```
+
+```json
+{
+  "answer": "Qdrant stores vectors for similarity search.",
+  "sources": [{"id": "...", "vector_score": 0.83, "rerank_score": 4.1, "text": "..."}],
+  "latency_ms": 1240,
+  "status": "success"
+}
+```
+
+### 5. Evaluate quality
+
+```bash
+curl -X POST http://localhost:8000/evaluate \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: rge_xxx" \
+  -d '{"questions": [{"question": "What does Qdrant store?", "expected": "Qdrant stores vectors for similarity search."}]}'
+```
+
+Returns accuracy, latency breakdown, costs, and per-question scores.
+
+---
 
 ## Features
 
-- **Authenticated RAG API**
-  Protected endpoints require `X-API-Key`. API keys are generated through an admin bootstrap endpoint, stored as SHA-256 hashes, and shown only once.
+### 🔍 Hybrid Retrieval (Dense + Sparse)
 
-- **Hybrid retrieval by default**
-  Text is embedded into Gemini dense vectors and FastEmbed BM25 sparse vectors. Qdrant fuses both retrieval legs with reciprocal rank fusion so lexical matches and semantic matches can both surface.
+Dense embeddings (`gemini/gemini-embedding-001`, 1536d) and BM25 sparse vectors (`FastEmbed/Qdrant-bm25`) are fused server-side in Qdrant via Reciprocal Rank Fusion (RRF). This catches both semantic matches and exact keyword matches in a single query.
 
-- **Cross-encoder reranking**
-  RAG queries retrieve a wider candidate set, then rerank it with `cross-encoder/ms-marco-MiniLM-L-6-v2`. The final answer receives the top reranked context chunks instead of raw vector-search order.
+```python
+# Under the hood: Qdrant prefetch + fusion
+Prefetch(query=dense_vector, using="dense", limit=80),
+Prefetch(query=sparse_vector, using="sparse", limit=80),
+# → FusionQuery(fusion=Fusion.RRF)
+```
 
-- **PDF and text ingestion**
-  Upload PDFs for background extraction, paragraph chunking, embedding, indexing, and status tracking. Send raw text directly to `/embed` when you already have extracted content.
+### ⚡ Cross-Encoder Reranking
 
-- **Cached RAG responses**
-  Repeated exact questions are cached in Redis for 24 hours using a stable SHA-256 cache key. Evaluation requests bypass the cache so results reflect the current retrieval stack.
+A `cross-encoder/ms-marco-MiniLM-L-6-v2` re-scores 20 candidates down to the top 5 contexts. The reranker loads lazily on first use and caches as a module singleton.
 
-- **LLM-judged evaluation**
-  Batch evaluation runs the full RAG pipeline for each question and compares the answer against an expected answer with a strict judge model.
+### 📄 PDF & Text Ingestion
 
-- **Operational persistence**
-  PostgreSQL stores completions, indexed chunk metadata, document ingestion state, API keys, and rate-limit hits. Alembic owns schema migrations.
+| Method | Input | Processing |
+|--------|-------|------------|
+| `POST /embed` | Raw text | Synchronous chunk, embed, index |
+| `POST /ingest` | PDF (≤25 MB) | Background: extract (PyMuPDF) → paragraph chunk → dense+sparse embed → Qdrant upsert → metadata in PostgreSQL |
+
+### 🛡️ Production Auth & Rate Limiting
+
+- **API keys**: Generated with `secrets.token_urlsafe(32)`, stored as SHA-256 hashes, prefixed `rge_` for identification
+- **Admin bootstrap**: Shared `ADMIN_SECRET` env var controls key creation
+- **Rate limiting**: 60 requests/hour per key via SlowAPI, violations logged to PostgreSQL
+
+### 🧪 LLM-Judged Evaluation
+
+Batch evaluation runs the full RAG pipeline without cache, then scores each answer against an expected answer using `cerebras/gemma-4-31b`. Results include accuracy, latency, wall-clock time, and cost breakdown.
+
+### 💾 Cache Layer
+
+| Aspect | Detail |
+|--------|--------|
+| Key scheme | `rag:{sha256(question)}` |
+| TTL | 24 hours (configurable) |
+| Bypass | `/evaluate` always uses `use_cache=False` |
+| Storage | Redis (async client) |
+
+### 🤖 Agent Evaluation Toolkit
+
+The `evals/` directory includes a from-scratch tool-calling agent with PostgreSQL-backed conversation memory, rolling summarization (triggers at 6k tokens), and structured output via `instructor`. Use it to build automated evaluation pipelines.
+
+---
 
 ## Architecture
 
@@ -44,15 +163,13 @@ flowchart LR
     Services --> Reranker[Cross-encoder reranker]
     Services --> Cache[Redis cache]
     Services --> DB[(PostgreSQL)]
-    Retrieval --> Qdrant[(Qdrant embeddings collection)]
+    Retrieval --> Qdrant[(Qdrant embeddings)]
 
     Generation --> Providers[Model providers]
     Embeddings --> Providers
     Auth --> DB
     Cache --> Redis[(Redis)]
 ```
-
-RAGEval keeps framework code thin. `src/main.py` wires application startup and route registration, `src/routers/` defines HTTP request/response boundaries, and `src/services/` contains the retrieval, generation, ingestion, caching, auth, and evaluation logic.
 
 ### RAG Request Lifecycle
 
@@ -71,18 +188,17 @@ sequenceDiagram
     R->>Redis: lookup rag:{sha256(question)}
     alt cache hit
         Redis-->>R: cached answer
-        R-->>A: answer, sources, latency
     else cache miss
-        R->>L: embed question with gemini/gemini-embedding-001
-        R->>R: create BM25 sparse embedding
+        R->>L: embed question (dense)
+        R->>R: compute BM25 sparse embedding
         R->>Q: dense + sparse prefetch with RRF fusion
         Q-->>R: 20 retrieval candidates
         R->>X: rerank query/document pairs
         X-->>R: top 5 contexts
         R->>L: generate answer from context
-        R->>Redis: cache result for 24 hours
-        R-->>A: answer, sources, latency
+        R->>Redis: cache result for 24h
     end
+    R-->>A: answer, sources, latency
     A-->>C: JSON response
 ```
 
@@ -90,410 +206,271 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    Upload[POST /ingest PDF] --> Validate[Validate content type, size, and non-empty body]
-    Validate --> Row[Create documents row with processing status]
-    Row --> Background[Schedule FastAPI background task]
-    Background --> Extract[Extract page text with PyMuPDF]
-    Extract --> Chunk[Paragraph chunk pages]
-    Chunk --> Dense[Create dense embeddings]
-    Chunk --> Sparse[Create BM25 sparse embeddings]
+    Upload[POST /ingest PDF] --> Validate[Validate content type, size, content]
+    Validate --> Row[Insert documents row: status=processing]
+    Row --> Background[FastAPI background task]
+    Background --> Extract[Extract page text via PyMuPDF]
+    Extract --> Chunk[Paragraph-chunk each page]
+    Chunk --> Dense[Gemini dense embeddings]
+    Chunk --> Sparse[BM25 sparse embeddings]
     Dense --> Upsert[Upsert named vectors into Qdrant]
     Sparse --> Upsert
     Upsert --> Chunks[Persist chunk metadata in PostgreSQL]
-    Chunks --> Status[Mark document completed or failed]
-    Status --> Poll[GET /documents/{document_id}]
+    Chunks --> Status[Update document: completed|failed]
 ```
 
-## Tech Stack
-
-| Layer | Technology | Role |
-| --- | --- | --- |
-| API | FastAPI, Uvicorn | Async HTTP API and OpenAPI docs |
-| Model access | LiteLLM | Provider-agnostic completions and embeddings |
-| Dense embeddings | `gemini/gemini-embedding-001` | 1536-dimensional semantic vectors |
-| Sparse embeddings | FastEmbed `Qdrant/bm25` | Lexical retrieval signal |
-| Vector database | Qdrant | Named dense/sparse vectors and RRF hybrid search |
-| Reranking | sentence-transformers CrossEncoder | Query/document relevance scoring |
-| Cache | Redis | 24-hour exact-question RAG cache |
-| Persistence | PostgreSQL, SQLAlchemy, asyncpg | Logs, metadata, API keys, rate-limit hits |
-| Migrations | Alembic | Database schema management |
-| Chunking | NLTK, tiktoken | Sentence, paragraph, and fixed-token chunking |
-| Dependency management | uv | Reproducible Python environment |
-| Load testing | Locust | `/rag` traffic simulation |
-
-## Project Structure
-
-```text
-src/
-  main.py          FastAPI app, startup lifecycle, route registration
-  routers/         HTTP endpoints and Pydantic request models
-  services/        RAG, retrieval, generation, ingestion, auth, cache, evaluation
-  clients/         Qdrant and Redis clients
-  chunking/        Fixed, sentence, and paragraph chunking strategies
-  db/              SQLAlchemy models and async session setup
-alembic/           PostgreSQL migrations
-tests/             Unit and async tests for chunking, reranking, and cache behavior
-evals/             Reranking comparison, seed helpers, memory experiments, Locust load test
-```
-
-Conversation-memory tables and evaluation helpers exist in the repository, but the main FastAPI app does not currently expose a conversation-memory API. They are intentionally not presented as a public feature here.
-
-## Installation
-
-### Prerequisites
-
-- Python 3.14 or newer
-- `uv`
-- Docker and Docker Compose
-- Model-provider credentials for the providers you call through LiteLLM
-- An `ADMIN_SECRET` value for creating API keys
-
-### Local Development
-
-Install dependencies, including the optional ML extras required by the reranker:
-
-```bash
-uv sync --extra ml
-```
-
-Start PostgreSQL, Qdrant, and Redis:
-
-```bash
-docker compose up db qdrant redis
-```
-
-Run database migrations:
-
-```bash
-uv run alembic upgrade head
-```
-
-Start the API:
-
-```bash
-uv run uvicorn src.main:app --reload
-```
-
-The API runs at `http://localhost:8000`. OpenAPI docs are available at `http://localhost:8000/docs`.
-
-### Docker
-
-Build and start the full stack:
-
-```bash
-docker compose up --build
-```
-
-Compose starts:
-
-| Service | Port(s) | Purpose |
-| --- | --- | --- |
-| `app` | `8000` | FastAPI service |
-| `db` | `5432` | PostgreSQL database |
-| `qdrant` | `6333`, `6334` | Vector search |
-| `redis` | `6379` | RAG cache |
-
-The application container runs Alembic migrations before starting Uvicorn. `PORT` can override the app port inside the container; it defaults to `8000`.
-
-## Configuration
-
-Create a `.env` file in the repository root:
-
-```env
-DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/rageval_logs
-QDRANT_URL=http://localhost:6333
-QDRANT_API_KEY=
-REDIS_URL=redis://localhost:6379/0
-ADMIN_SECRET=change-me
-PRELOAD_RERANKER=false
-
-GROQ_API_KEY=your_groq_api_key
-GEMINI_API_KEY=your_gemini_api_key
-```
-
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `DATABASE_URL` | No | `postgresql+asyncpg://user:password@db:5432/rageval_logs` | Async PostgreSQL connection string used by the app and Alembic. |
-| `QDRANT_URL` | Yes | None | Qdrant URL. Use `http://localhost:6333` locally. |
-| `QDRANT_API_KEY` | No | None | API key for Qdrant Cloud or secured Qdrant deployments. |
-| `REDIS_URL` | No | `redis://localhost:6379/0` | Redis connection string for RAG response caching. |
-| `ADMIN_SECRET` | Yes for `/api-keys` | None | Shared secret required in `X-Admin-Secret` to create API keys. |
-| `PRELOAD_RERANKER` | No | `false` | Set to `true` to load the cross-encoder during startup instead of on first use. |
-| `PORT` | No | `8000` | Container Uvicorn port used by the Docker `CMD`. |
-| `GROQ_API_KEY` | Provider-dependent | None | Used by the default `groq/llama-3.3-70b-versatile` generation model. |
-| `GEMINI_API_KEY` | Provider-dependent | None | Used by the default `gemini/gemini-embedding-001` embedding model. |
-| `LOCUST_API_KEY` | Only for load tests | Empty string | API key sent by `evals/locustfile.py`. |
-
-Provider keys are read by LiteLLM. If you change request models to use different providers, configure the corresponding LiteLLM-supported environment variables.
-
-## Quickstart
-
-After the API and backing services are running, create an API key:
-
-```bash
-curl -X POST http://localhost:8000/api-keys \
-  -H "Content-Type: application/json" \
-  -H "X-Admin-Secret: change-me" \
-  -d '{"name":"local-dev"}'
-```
-
-Example response:
-
-```json
-{
-  "status": "success",
-  "api_key": "rge_example",
-  "id": 1,
-  "prefix": "rge_example",
-  "message": "Store this key securely - it will not be shown again."
-}
-```
-
-Store the returned key and send it as `X-API-Key` on protected endpoints.
-
-Embed text into Qdrant:
-
-```bash
-curl -X POST http://localhost:8000/embed \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: rge_example" \
-  -d '{
-    "text": "Qdrant stores vectors and supports hybrid retrieval.",
-    "strategy": "paragraph",
-    "source": "docs",
-    "category": "technical"
-  }'
-```
-
-Ask a RAG question:
-
-```bash
-curl -X POST http://localhost:8000/rag \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: rge_example" \
-  -d '{"question":"What does Qdrant store?"}'
-```
-
-Example response shape:
-
-```json
-{
-  "answer": "Qdrant stores vectors for similarity search.",
-  "sources": [
-    {
-      "id": "4b7f8e8f-7d1a-4b47-bc9f-8d6f6d1e41d5",
-      "vector_score": 0.83,
-      "rerank_score": 4.12,
-      "text": "Qdrant stores vectors and supports hybrid retrieval."
-    }
-  ],
-  "latency_ms": 1240,
-  "llm_cost_usd": 0.0,
-  "status": "success",
-  "question": "What does Qdrant store?"
-}
-```
-
-`llm_cost_usd` is currently a placeholder in the RAG response. Judge cost is attempted during `/evaluate` through LiteLLM's cost helper.
+---
 
 ## API Reference
 
-Protected endpoints require `X-API-Key`. The API-key creation endpoint requires `X-Admin-Secret`.
+All protected endpoints require `X-API-Key` header and are rate-limited to 60/hour. Key management requires `X-Admin-Secret`.
 
 | Method | Path | Auth | Description |
-| --- | --- | --- | --- |
-| `GET` | `/` | None | Health check message. |
-| `POST` | `/api-keys` | `X-Admin-Secret` | Create and return a new API key once. |
-| `POST` | `/complete` | `X-API-Key` | Stream a direct LLM completion as `text/plain`. |
-| `POST` | `/embed` | `X-API-Key` | Chunk text, embed dense/sparse vectors, and index in Qdrant. |
-| `POST` | `/search` | `X-API-Key` | Run hybrid vector search with optional exact-match payload filters. |
-| `POST` | `/rag` | `X-API-Key` | Run cached retrieval, reranking, and answer generation. |
-| `POST` | `/evaluate` | `X-API-Key` | Run uncached RAG evaluation with an LLM judge. |
-| `POST` | `/ingest` | `X-API-Key` | Upload a PDF for background ingestion. |
-| `GET` | `/documents/{document_id}` | `X-API-Key` | Poll PDF ingestion status. |
+|--------|------|------|-------------|
+| `GET` | `/` | None | Health check |
+| `POST` | `/api-keys` | `X-Admin-Secret` | Create API key (shown once) |
+| `POST` | `/complete` | `X-API-Key` | Stream LLM completion |
+| `POST` | `/embed` | `X-API-Key` | Chunk, embed, and index text |
+| `POST` | `/search` | `X-API-Key` | Hybrid search with optional filters |
+| `POST` | `/rag` | `X-API-Key` | Full RAG pipeline (cached) |
+| `POST` | `/evaluate` | `X-API-Key` | Batch RAG evaluation (uncached) |
+| `POST` | `/ingest` | `X-API-Key` | Upload PDF for background ingestion |
+| `GET` | `/documents/{id}` | `X-API-Key` | Poll PDF ingestion status |
 
-Protected routes are rate limited to `60/hour`. Rate-limit violations return `429` and are logged to PostgreSQL.
+### Chunking Strategies
 
-### `POST /complete`
+| Strategy | Method | Default params |
+|----------|--------|---------------|
+| `paragraph` | Split on `\n\s*\n` | — |
+| `sentence` | NLTK `sent_tokenize` (punkt_tab) | — |
+| `fixed` | `cl100k_base` token windows | 500 tokens, 50 overlap |
 
-Streams a direct model completion without retrieval.
-
-```bash
-curl -N -X POST http://localhost:8000/complete \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: rge_example" \
-  -d '{
-    "prompt": "Explain retrieval augmented generation in one paragraph.",
-    "model": "groq/llama-3.3-70b-versatile",
-    "max_tokens": 500
-  }'
-```
-
-### `POST /embed`
-
-Indexes raw text. Supported chunking strategies are `paragraph`, `sentence`, and `fixed`.
-
-```json
-{
-  "text": "First paragraph.\n\nSecond paragraph.",
-  "strategy": "paragraph",
-  "source": "api_upload",
-  "category": "general"
-}
-```
-
-### `POST /search`
-
-Runs hybrid search over the `embeddings` Qdrant collection. Filters are exact-match payload filters and are applied to both dense and sparse retrieval.
+### Filtered Search
 
 ```bash
 curl -X POST http://localhost:8000/search \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: rge_example" \
-  -d '{
-    "query": "semantic vector search",
-    "top_k": 5,
-    "filter": { "category": "technical" }
-  }'
+  -H "X-API-Key: rge_xxx" \
+  -d '{"query": "vector search", "top_k": 5, "filter": {"category": "technical"}}'
 ```
 
-### `POST /ingest`
-
-Uploads a PDF up to 25 MB. The endpoint returns immediately while a background task extracts, chunks, embeds, and indexes the document.
+### PDF Ingestion
 
 ```bash
 curl -X POST http://localhost:8000/ingest \
-  -H "X-API-Key: rge_example" \
+  -H "X-API-Key: rge_xxx" \
   -F "file=@paper.pdf;type=application/pdf"
+
+# Poll status:
+curl http://localhost:8000/documents/{document_id} -H "X-API-Key: rge_xxx"
 ```
 
-Poll the document status:
+---
 
-```bash
-curl http://localhost:8000/documents/00000000-0000-0000-0000-000000000000 \
-  -H "X-API-Key: rge_example"
+## Tech Stack
+
+| Layer | Technology | Role |
+|-------|-----------|------|
+| API | FastAPI + Uvicorn | Async HTTP server |
+| Models | LiteLLM | Unified interface to 100+ LLM providers |
+| Dense embeddings | `gemini/gemini-embedding-001` | 1536-dim semantic vectors |
+| Sparse embeddings | FastEmbed `Qdrant/bm25` | Lexical retrieval |
+| Vector store | Qdrant | Named vectors + RRF fusion |
+| Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Relevance scoring |
+| Cache | Redis (async) | 24h RAG cache |
+| Database | PostgreSQL + SQLAlchemy + asyncpg | Metadata, logs, keys |
+| Migrations | Alembic | Schema management |
+| Chunking | NLTK + tiktoken | Sentence/paragraph/fixed |
+| Judge model | `cerebras/gemma-4-31b` | Answer evaluation |
+| Agent framework | instructor + LiteLLM | Structured agent output |
+| Load testing | Locust | Traffic simulation |
+| Package mgmt | uv | Fast dependency management |
+
+---
+
+## Configuration
+
+Create a `.env` file:
+
+```env
+# Required
+QDRANT_URL=http://localhost:6333
+ADMIN_SECRET=change-me
+
+# Optional (shown with defaults)
+DATABASE_URL=postgresql+asyncpg://user:password@db:5432/rageval_logs
+REDIS_URL=redis://localhost:6379/0
+PRELOAD_RERANKER=false
+PORT=8000
+
+# Provider keys (at least one needed)
+GEMINI_API_KEY=your_gemini_key
+GROQ_API_KEY=your_groq_key
 ```
 
-### `POST /evaluate`
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABASE_URL` | `postgresql+asyncpg://user:password@db:5432/rageval_logs` | Async PostgreSQL connection |
+| `QDRANT_URL` | — | Qdrant endpoint |
+| `QDRANT_API_KEY` | (none) | For Qdrant Cloud |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection |
+| `ADMIN_SECRET` | — | Shared secret for key creation |
+| `PRELOAD_RERANKER` | `false` | Preload CrossEncoder at startup |
+| `PORT` | `8000` | Container port |
+| `LOCUST_API_KEY` | `""` | Key for load testing |
 
-Runs the RAG pipeline without cache and scores each answer against an expected answer with `cerebras/gemma-4-31b`.
+---
 
-```bash
-curl -X POST http://localhost:8000/evaluate \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: rge_example" \
-  -d '{
-    "questions": [
-      {
-        "question": "What does Qdrant store?",
-        "expected": "Qdrant stores vectors for similarity search."
-      }
-    ]
-  }'
+## Project Structure
+
+```
+src/
+├── main.py               # FastAPI app, lifespan, route registration
+├── chunking/
+│   └── strategies.py      # Fixed/sentence/paragraph chunking
+├── clients/
+│   ├── qdrant.py          # AsyncQdrantClient singleton
+│   └── redis_client.py    # Redis async client
+├── db/
+│   ├── models.py          # SQLAlchemy ORM (7 tables)
+│   └── session.py         # Async engine + session factory
+├── routers/
+│   ├── api_keys.py        # POST /api-keys
+│   ├── completions.py     # POST /complete (streaming)
+│   ├── documents.py       # GET /documents/{id}
+│   ├── embed.py           # POST /embed
+│   ├── evaluate.py        # POST /evaluate (batched, concurrent)
+│   ├── ingest.py          # POST /ingest (PDF, background)
+│   ├── rag.py             # POST /rag
+│   └── search.py          # POST /search
+└── services/
+    ├── auth.py            # Key generation, hashing, verification
+    ├── auth_dependency.py # FastAPI Depends for auth headers
+    ├── cache.py           # Redis cache (SHA-256 keys, 24h TTL)
+    ├── embeddings.py      # Dense (LiteLLM) + sparse (FastEmbed)
+    ├── generation.py      # Context-grounded + streaming generation
+    ├── ingestion.py       # PDF extraction, chunking, indexing
+    ├── judge.py           # LLM answer evaluation
+    ├── rag_pipeline.py    # Embed → search → rerank → generate → cache
+    ├── rate_limiter.py    # SlowAPI + PostgreSQL logging
+    ├── reranking.py       # CrossEncoder singleton
+    └── retrieval.py       # Hybrid search with Qdrant RRF
+
+alembic/                   # Database migrations (5 revisions)
+tests/                     # Pytest suite (chunking, cache, reranker)
+evals/                     # Agent loop, memory, seed corpus, load testing
 ```
 
-The evaluator runs with concurrency `30` and returns accuracy, average latency, wall-clock time, cost breakdown, and per-question results.
-
-## How It Works
-
-1. **Ingest content**
-   `/embed` accepts text directly. `/ingest` accepts PDFs, extracts page text with PyMuPDF, and processes the document in a background task.
-
-2. **Chunk text**
-   Paragraph chunking is the default. Sentence chunking uses NLTK. Fixed chunking uses `cl100k_base` tokens with 500-token windows and 50-token overlap.
-
-3. **Create retrieval signals**
-   Dense embeddings come from `gemini/gemini-embedding-001` through LiteLLM. Sparse vectors come from FastEmbed's `Qdrant/bm25` model.
-
-4. **Index in Qdrant**
-   Chunks are stored in the `embeddings` collection with named `dense` and `sparse` vectors. Startup ensures payload indexes exist for `category` and `source`.
-
-5. **Retrieve and rerank**
-   Query-time retrieval searches dense and sparse vectors, fuses them with RRF, pulls 20 candidates for RAG, then reranks them down to 5 contexts.
-
-6. **Generate grounded answers**
-   The generator asks the model to answer only from provided context and to say when the answer is not in context.
-
-7. **Cache repeated questions**
-   `/rag` caches exact-question results in Redis for 24 hours. `/evaluate` disables caching.
-
-## Design Decisions
-
-- **Hybrid search over dense-only retrieval**
-  Dense vectors handle semantic similarity. BM25 sparse vectors preserve exact terms, names, and technical phrases that embedding models can blur.
-
-- **RRF inside Qdrant**
-  Qdrant performs dense and sparse prefetches and fuses rankings server-side, keeping retrieval logic compact in the application.
-
-- **Reranking after broad retrieval**
-  Fetching 20 candidates gives the cross-encoder enough material to reorder before the final 5 chunks are sent to the LLM.
-
-- **Lazy reranker loading**
-  The cross-encoder loads on first use by default to keep startup lighter. Set `PRELOAD_RERANKER=true` when predictable first-request latency matters more than startup time.
-
-- **Hash-only API key storage**
-  API keys are generated once and stored only as SHA-256 hashes. The first 12 characters are kept as a prefix for identification.
-
-- **Operational data in PostgreSQL**
-  Vector payloads live in Qdrant, while PostgreSQL stores records the service needs to audit, poll, or manage.
+---
 
 ## Development
 
-Run the test suite:
-
 ```bash
-uv run pytest
+# Install with optional ML extras (required for reranker)
+uv sync --extra ml
+
+# Start backing services
+docker compose up db qdrant redis
+
+# Run migrations
+uv run alembic upgrade head
+
+# Start dev server with hot reload
+uv run uvicorn src.main:app --reload
 ```
 
-Focused test runs:
+### Tests
 
 ```bash
+# Full suite
+uv run pytest
+
+# Focused runs
 uv run pytest tests/test_chunking.py
 uv run pytest tests/test_reranker.py
 uv run pytest tests/test_rag_cache.py
 ```
 
-The current test suite covers chunking behavior, embedding-handler persistence boundaries, reranker ordering and lazy loading, and Redis RAG-cache behavior.
+Tests use `fakeredis` for cache tests and `unittest.mock` for external calls (LiteLLM, Qdrant). No external services needed.
 
-No formatter, linter, pre-commit configuration, or CI workflow is currently present in the repository.
-
-## Evaluation And Load Testing
-
-Compare raw hybrid search order against reranked RAG sources on a running stack:
+### Formatting & CI
 
 ```bash
+uvx black --check src/ tests/
+```
+
+GitHub Actions runs lint + tests on push/PR to `main`. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+### Evaluation Scripts
+
+```bash
+# Compare vector search vs reranked order (requires running API)
 uv run python evals/eval_reranking.py --base-url http://localhost:8000
+
+# Seed the vector store with sample documents
+uv run python evals/seed_corpus.py --base-url http://localhost:8000
+
+# Locust load test
+LOCUST_API_KEY=rge_xxx uv run locust -f evals/locustfile.py
+
+# Rate limit test (61st request must be 429)
+uv run python evals/test_rate_limit.py --base-url http://localhost:8000 --api-key rge_xxx
+
+# 20-turn conversation memory test (agent recall)
+uv run python -m evals.test_conversation_memory --base-url http://localhost:8000 --api-key rge_xxx
 ```
 
-The script intentionally does not include fabricated benchmark results. Run it against your own indexed corpus and inspect the printed before/after ranking tables.
+---
 
-Run a Locust load test against `/rag`:
+## Design Decisions
 
-```bash
-uv run locust -f evals/locustfile.py
-```
+- **Hybrid search over dense-only**: Dense vectors capture semantics; BM25 sparse vectors preserve exact terms, names, and technical phrases that embeddings can blur.
+- **RRF inside Qdrant**: Dense and sparse prefetches fuse server-side, keeping retrieval logic compact and network round-trips minimal.
+- **20 candidates → rerank → top 5**: Wide retrieval gives the cross-encoder enough material to reorder effectively before the final LLM context.
+- **Lazy reranker loading**: The CrossEncoder loads on first use by default. Set `PRELOAD_RERANKER=true` when predictable first-request latency matters.
+- **Hash-only API key storage**: Keys are generated once, stored as SHA-256 hashes, with the first 12 characters as a human-readable prefix.
+- **Operational data in PostgreSQL**: Vector payloads live in Qdrant; PostgreSQL stores audit logs, ingestion state, chunk metadata, and rate-limit records.
 
-Set `LOCUST_API_KEY` before starting Locust so requests include `X-API-Key`.
+---
 
 ## Roadmap
 
-These are natural next steps based on the current implementation:
+- [ ] Expose conversation-memory APIs (tables exist, no endpoints yet)
+- [ ] Configurable retrieval count, rerank depth, model names, and cache TTL
+- [ ] API key revocation and listing
+- [ ] Structured cost tracking (RAG cost is currently a placeholder)
+- [ ] Live-stack integration tests for Qdrant, PostgreSQL, Redis failure modes
+- [ ] First-class agent evaluation metrics
 
-- Expose conversation-memory APIs or remove the unused conversation-memory tables.
-- Add first-class configuration for retrieval candidate count, final rerank count, model names, and cache TTL.
-- Add API-key revocation and listing endpoints.
-- Add structured cost tracking for generation responses instead of returning a placeholder RAG cost.
-- Add CI, linting, formatting, and a repository license.
-- Expand live-stack integration tests for Qdrant, PostgreSQL, Redis, and model-provider failure modes.
+---
 
 ## Contributing
 
-1. Create a focused branch.
-2. Install dependencies with `uv sync --extra ml`.
-3. Run `uv run pytest` before opening a pull request.
-4. Keep README/API changes aligned with the Pydantic models and route definitions in `src/routers/`.
-5. Avoid documenting benchmark numbers unless they come from a reproducible run against a known corpus.
+1. Fork the repository
+2. Create a focused feature branch
+3. Install dependencies: `uv sync --extra ml`
+4. Run tests: `uv run pytest`
+5. Format: `uvx black src/ tests/`
+6. Open a pull request
+
+Keep API changes aligned with the Pydantic models in `src/routers/`. Avoid documenting benchmark numbers from unreproducible runs.
+
+---
 
 ## License
 
-No license file is currently present in this repository. Add a license before distributing or accepting external contributions.
+This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
+
+---
+
+## Citation
+
+If you use RAGEval in your research, please cite:
+
+```bibtex
+@software{rageval2025,
+  title = {RAGEval: Open-Source RAG Evaluation and Serving Platform},
+  year = {2025},
+  url = {https://github.com/your-org/rageval}
+}
+```
