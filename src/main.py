@@ -5,12 +5,15 @@ from fastapi import FastAPI, Depends, Request, BackgroundTasks, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from dotenv import load_dotenv
 import logging
 
+from src.telemetry import setup_tracing
 from src.db import engine, Base
 from src.clients import qdrant_client, redis_client
 from src.services.reranking import get_reranker
@@ -36,6 +39,8 @@ from src.routers.documents import get_document_status
 load_dotenv()
 
 logger = logging.getLogger("uvicorn.error")
+
+setup_tracing()
 
 
 @asynccontextmanager
@@ -117,6 +122,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+"""Auto-instrument FastAPI: every request to every route automatically gets
+its own span (name, method, path, status code, duration) with zero
+per-endpoint code changes needed."""
+
+FastAPIInstrumentor.instrument_app(app)
 
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)

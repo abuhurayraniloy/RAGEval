@@ -25,6 +25,13 @@ on some Groq-hosted models). llama-3.1-8b-instant has proven more reliable
 for structured tool calling, so that's the default here. A retry is still
 kept as a safety net in case a malformed tool call slips through anyway.
 
+# [MODIFIED] Three separate model/provider assignments now, so tool
+# calling, structured output, and summarization each draw from an
+# independent rate-limit budget instead of competing for the same one:
+#   - MODEL            (Groq)     -> tool-calling loop
+#   - STRUCTURED_MODEL  (Cerebras) -> final structured AgentResponse call
+#   - SUMMARY_MODEL     (Gemini, in evals/memory.py) -> history summarization
+
 Usage:
     python -m evals.agent --base-url http://localhost:8000 --api-key <key>
 """
@@ -50,7 +57,14 @@ from evals.memory import build_context, save_message, maybe_summarize
 
 load_dotenv()
 
-MODEL = "groq/llama-3.1-8b-instant"
+MODEL = "groq/llama-3.1-8b-instant"  # tool-calling loop
+
+# [MODIFIED] New: a separate model, on a separate provider, for the final
+# structured-output call. Keeps this call from competing with the
+# tool-calling loop's Groq TPM budget, and Cerebras is already proven
+# reliable in this codebase for a similarly precise, single-shot task
+# (see src/services/judge.py, which uses cerebras/gemma-4-31b).
+STRUCTURED_MODEL = "cerebras/gemma-4-31b"
 
 # Patch LiteLLM's completion function with instructor. This gives us an
 # optional response_model=... argument on chat.completions.create(), which
@@ -238,7 +252,7 @@ def dispatch_tool(name: str, args: dict, base_url: str, api_key: str) -> str:
 
 
 def _extract_retry_seconds(error_message: str, default: float = 6.0) -> float:
-    """Pull a suggested wait time out of Groq's rate limit error message,
+    """Pull a suggested wait time out of a rate limit error message,
     e.g. "Please try again in 5.6s", falling back to a default if not found."""
     match = re.search(r"try again in ([\d.]+)s", error_message)
     if match:
@@ -246,6 +260,12 @@ def _extract_retry_seconds(error_message: str, default: float = 6.0) -> float:
     return default
 
 
+# [MODIFIED] Restored as the plain tool-calling call (was accidentally
+# replaced by the instructor/structured version in the last edit, which
+# broke this function - it returned an AgentResponse instead of a raw
+# completion, so response.choices[0].message crashed the moment the model
+# tried to make a tool call rather than answer directly). This function
+# is now ONLY responsible for the tool-calling loop's LLM calls.
 def call_llm_with_retry(messages: list, max_retries: int = 5):
     """Call the LLM with tool calling, retrying on:
     - malformed tool-call errors (an occasional Groq native tool-calling
@@ -281,6 +301,35 @@ def call_llm_with_retry(messages: list, max_retries: int = 5):
     raise last_error
 
 
+# [MODIFIED] New, separate function for the structured final-answer call.
+# Previously this call had NO rate-limit retry at all (it crashed
+# immediately on a 429, since instructor's own internal retry is meant
+# for validation failures, not provider rate limits). Now uses
+# STRUCTURED_MODEL (Cerebras) instead of MODEL (Groq), so it draws from
+# an independent quota entirely.
+def call_structured_with_retry(messages: list, max_retries: int = 5):
+    """Call instructor's structured completion for the final AgentResponse,
+    retrying on rate limit errors with the same backoff logic used for the
+    tool-calling call."""
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            return instructor_client.chat.completions.create(
+                model=STRUCTURED_MODEL,
+                messages=messages,
+                response_model=AgentResponse,
+            )
+        except RateLimitError as e:
+            last_error = e
+            wait_seconds = _extract_retry_seconds(str(e))
+            print(
+                f"  [structured retry {attempt + 1}] Rate limit hit, waiting {wait_seconds:.1f}s..."
+            )
+            time.sleep(wait_seconds)
+            continue
+    raise last_error
+
+
 # --- The agent loop, with persisted memory + structured final output -----
 
 
@@ -312,6 +361,9 @@ async def run_agent_turn(
     messages = await build_context(conversation_id, SYSTEM_PROMPT)
 
     for turn in range(max_turns):
+        # [MODIFIED] Calls the tool-calling function again, not the
+        # structured one - this is the actual bug fix. This call returns a
+        # raw litellm completion object, so .choices[0].message works.
         response = call_llm_with_retry(messages)
         message = response.choices[0].message
 
@@ -323,17 +375,23 @@ async def run_agent_turn(
                 {
                     "role": "user",
                     "content": (
-                        "Based on everything above, provide your final answer "
-                        "in the required structured format."
+                        # [MODIFIED] Explicitly re-anchors on the actual
+                        # current question, since the model was previously
+                        # blending in answers from earlier, unrelated
+                        # turns instead of answering the current one.
+                        f'The original question you must answer is: "{user_message}"\n\n'
+                        "Answer ONLY that question, using the tool results "
+                        "above if relevant. Do not repeat or reference "
+                        "answers to earlier, unrelated questions in this "
+                        "conversation. Provide your final answer in the "
+                        "required structured format."
                     ),
                 }
             )
 
-            structured_answer = instructor_client.chat.completions.create(
-                model=MODEL,
-                messages=messages,
-                response_model=AgentResponse,
-            )
+            # [MODIFIED] Uses the new structured-call function with its
+            # own rate-limit retry, on Cerebras instead of Groq.
+            structured_answer = call_structured_with_retry(messages)
 
             if verbose:
                 print(f"  [turn {turn + 1}] Final structured answer.")

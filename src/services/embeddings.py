@@ -3,6 +3,8 @@
 from litellm import aembedding
 from fastembed import SparseTextEmbedding
 
+from src.telemetry import llm_span
+
 _sparse_model: SparseTextEmbedding | None = None
 
 
@@ -41,8 +43,16 @@ async def embed_text(
     Returns:
         List of embedding floats
     """
-    response = await aembedding(model=model, input=[text], dimensions=dimensions)
-    return response.data[0].embedding
+
+    with llm_span("embed_text", model=model) as set_tokens:
+        response = await aembedding(model=model, input=[text], dimensions=dimensions)
+        usage = getattr(response, "usage", None)
+        if usage:
+            set_tokens(
+                getattr(usage, "prompt_tokens", None),
+                getattr(usage, "completion_tokens", 0),
+            )
+        return response.data[0].embedding
 
 
 async def embed_texts(
@@ -58,8 +68,15 @@ async def embed_texts(
     Returns:
         List of embedding vectors
     """
-    response = await aembedding(model=model, input=texts, dimensions=dimensions)
-    return [
-        item.embedding if hasattr(item, "embedding") else item["embedding"]
-        for item in response.data
-    ]
+    with llm_span("embed_texts", model=model) as set_tokens:
+        response = await aembedding(model=model, input=texts, dimensions=dimensions)
+        usage = getattr(response, "usage", None)
+        if usage:
+            set_tokens(
+                getattr(usage, "prompt_tokens", None),
+                getattr(usage, "completion_tokens", 0),
+            )
+        return [
+            item.embedding if hasattr(item, "embedding") else item["embedding"]
+            for item in response.data
+        ]
