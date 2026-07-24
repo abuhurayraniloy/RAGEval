@@ -3,23 +3,15 @@
 from litellm import acompletion, completion_cost
 import logging
 
+from src.telemetry import llm_span
+
 logger = logging.getLogger("uvicorn.error")
 
 JUDGE_MODEL = "cerebras/gemma-4-31b"
 
 
 async def judge_answer(question: str, expected: str, actual: str) -> tuple[int, float]:
-    """Judge if an actual answer correctly addresses a question.
-
-    Args:
-        question: Original question
-        expected: Expected reference answer
-        actual: Actual answer to evaluate
-
-    Returns:
-        Tuple of (score, cost) where score is 1 (correct) or 0 (incorrect),
-        and cost is the USD cost of the evaluation
-    """
+    """Judge if an actual answer correctly addresses a question."""
     prompt = (
         "You are a strict answer evaluator for a RAG system.\n\n"
         f"Question: {question}\n"
@@ -31,21 +23,23 @@ async def judge_answer(question: str, expected: str, actual: str) -> tuple[int, 
         "No explanation, no punctuation — just the digit."
     )
 
-    response = await acompletion(
-        model=JUDGE_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=64,
-    )
+    with llm_span("judge_answer", model=JUDGE_MODEL) as set_tokens:
+        response = await acompletion(
+            model=JUDGE_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=64,
+        )
+        usage = getattr(response, "usage", None)
+        if usage:
+            set_tokens(usage.prompt_tokens, usage.completion_tokens)
 
     logger.info(response)
 
     content = response.choices[0].message.content
-
     if content is None:
         raise RuntimeError(f"Judge returned no content: {response}")
 
     raw = content.strip()
-
     score = next((int(c) for c in raw if c in "01"), 0)
 
     try:
@@ -57,14 +51,6 @@ async def judge_answer(question: str, expected: str, actual: str) -> tuple[int, 
 
 
 def extract_cost(response) -> float:
-    """Extract cost from a completion response.
-
-    Args:
-        response: Completion response object
-
-    Returns:
-        Cost in USD, or 0.0 if unable to calculate
-    """
     try:
         return completion_cost(completion_response=response)
     except Exception:

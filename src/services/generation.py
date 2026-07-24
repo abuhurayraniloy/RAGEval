@@ -4,6 +4,8 @@ from typing import AsyncGenerator
 from litellm import acompletion, APIError, APIConnectionError
 import logging
 
+from src.telemetry import llm_span
+
 logger = logging.getLogger("uvicorn.error")
 
 
@@ -32,15 +34,18 @@ async def generate_answer(
     )
     user_prompt = f"Context:\n{context}\n\nQuestion:\n{question}"
 
-    response = await acompletion(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-
-    return response.choices[0].message.content
+    with llm_span("generate_answer", model=model) as set_tokens:
+        response = await acompletion(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        usage = getattr(response, "usage", None)
+        if usage:
+            set_tokens(usage.prompt_tokens, usage.completion_tokens)
+        return response.choices[0].message.content
 
 
 async def stream_completion(
@@ -58,17 +63,24 @@ async def stream_completion(
     Yields:
         Streamed completion chunks
     """
-    response = await acompletion(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=max_tokens,
-        stream=True,
-    )
+    with llm_span("stream_completion", model=model) as set_tokens:
+        response = await acompletion(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            stream=True,
+        )
 
-    async for chunk in response:
-        content = chunk.choices[0].delta.content
-        if content:
-            yield content
+        completion_tokens_estimate = 0
+        async for chunk in response:
+            content = chunk.choices[0].delta.content
+            if content:
+                completion_tokens_estimate += (
+                    1  # rough proxy; streamed responses don't report usage per-chunk
+                )
+                yield content
+
+        set_tokens(None, completion_tokens_estimate)
 
 
 async def stream_answer(
@@ -92,16 +104,21 @@ async def stream_answer(
     )
     user_prompt = f"Context:\n{context}\n\nQuestion:\n{question}"
 
-    response = await acompletion(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        stream=True,
-    )
+    with llm_span("stream_answer", model=model) as set_tokens:
+        response = await acompletion(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            stream=True,
+        )
 
-    async for chunk in response:
-        content = chunk.choices[0].delta.content
-        if content:
-            yield content
+        completion_tokens_estimate = 0
+        async for chunk in response:
+            content = chunk.choices[0].delta.content
+            if content:
+                completion_tokens_estimate += 1
+                yield content
+
+        set_tokens(None, completion_tokens_estimate)
