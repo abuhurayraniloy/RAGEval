@@ -100,3 +100,16 @@ class ConversationSummary(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class AgentRetryLog(Base):
+    __tablename__ = "agent_retry_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    conversation_id: Mapped[str] = mapped_column(String(36), index=True)
+    retry_type: Mapped[str] = mapped_column(String(30))  # "invalid_json" | "tool_error"
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    detail: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

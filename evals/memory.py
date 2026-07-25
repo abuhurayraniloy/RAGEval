@@ -11,7 +11,12 @@ from dotenv import load_dotenv
 from sqlalchemy import select, delete
 from litellm import acompletion
 
-from src.db import AsyncSessionLocal, ConversationMessage, ConversationSummary
+from src.db import (
+    AsyncSessionLocal,
+    ConversationMessage,
+    ConversationSummary,
+    AgentRetryLog,
+)
 
 load_dotenv()
 
@@ -171,6 +176,30 @@ async def maybe_summarize(conversation_id: str) -> None:
         await session.execute(
             delete(ConversationMessage).where(
                 ConversationMessage.id.in_(summarized_ids)
+            )
+        )
+        await session.commit()
+
+
+async def log_retry(
+    conversation_id: str, retry_type: str, attempt_number: int, detail: str
+) -> None:
+    """Persist a record of an agent retry (invalid structured output or a
+    tool call error) to PostgreSQL.
+
+    Args:
+            conversation_id: Identifier for the conversation this retry occurred in
+            retry_type: "invalid_json" or "tool_error"
+            attempt_number: Which retry attempt this is (1-indexed)
+            detail: Description of what failed
+    """
+    async with AsyncSessionLocal() as session:
+        session.add(
+            AgentRetryLog(
+                conversation_id=conversation_id,
+                retry_type=retry_type,
+                attempt_number=attempt_number,
+                detail=detail[:2000],  # cap length, this is a log not a blob store
             )
         )
         await session.commit()
