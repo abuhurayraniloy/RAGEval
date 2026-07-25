@@ -54,8 +54,11 @@ from litellm.exceptions import BadRequestError, RateLimitError
 from pydantic import BaseModel, Field
 
 from evals.memory import build_context, save_message, maybe_summarize
+from src.telemetry import llm_span, setup_tracing
 
 load_dotenv()
+
+setup_tracing()
 
 MODEL = "groq/llama-3.1-8b-instant"  # tool-calling loop
 
@@ -276,12 +279,20 @@ def call_llm_with_retry(messages: list, max_retries: int = 5):
     last_error = None
     for attempt in range(max_retries):
         try:
-            return completion(
-                model=MODEL,
-                messages=messages,
-                tools=TOOLS,
-                tool_choice="auto",
-            )
+            with llm_span("agent_tool_call_turn", model=MODEL) as set_tokens:
+                response = completion(
+                    model=MODEL,
+                    messages=messages,
+                    tools=TOOLS,
+                    tool_choice="auto",
+                )
+                usage = getattr(response, "usage", None)
+                if usage:
+                    set_tokens(
+                        getattr(usage, "prompt_tokens", None),
+                        getattr(usage, "completion_tokens", None),
+                    )
+                return response
         except RateLimitError as e:
             last_error = e
             wait_seconds = _extract_retry_seconds(str(e))
@@ -308,22 +319,35 @@ def call_llm_with_retry(messages: list, max_retries: int = 5):
 # STRUCTURED_MODEL (Cerebras) instead of MODEL (Groq), so it draws from
 # an independent quota entirely.
 def call_structured_with_retry(messages: list, max_retries: int = 5):
-    """Call instructor's structured completion for the final AgentResponse,
-    retrying on rate limit errors with the same backoff logic used for the
-    tool-calling call."""
+    """Call instructor's structured completion for the final AgentResponse..."""
     last_error = None
     for attempt in range(max_retries):
         try:
-            return instructor_client.chat.completions.create(
-                model=STRUCTURED_MODEL,
-                messages=messages,
-                response_model=AgentResponse,
-            )
+            with llm_span(
+                "agent_structured_answer", model=STRUCTURED_MODEL
+            ) as set_tokens:
+                result = instructor_client.chat.completions.create(
+                    model=STRUCTURED_MODEL,
+                    messages=messages,
+                    response_model=AgentResponse,
+                )
+                # instructor's AgentResponse doesn't carry raw usage - the
+                # underlying completion object is available via
+                # result._raw_response when instructor is configured to
+                # attach it; falling back to no token data if unavailable.
+                raw = getattr(result, "_raw_response", None)
+                usage = getattr(raw, "usage", None) if raw else None
+                if usage:
+                    set_tokens(
+                        getattr(usage, "prompt_tokens", None),
+                        getattr(usage, "completion_tokens", None),
+                    )
+                return result
         except RateLimitError as e:
             last_error = e
-            wait_seconds = _extract_retry_seconds(str(e))
+            wait_seconds = 2 ** (attempt + 1)
             print(
-                f"  [structured retry {attempt + 1}] Rate limit hit, waiting {wait_seconds:.1f}s..."
+                f"  [structured retry {attempt + 1}] Rate limit / overload hit, waiting {wait_seconds}s..."
             )
             time.sleep(wait_seconds)
             continue
