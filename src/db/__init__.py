@@ -21,6 +21,7 @@ from src.db.models import (
     Document,
     ConversationMessage,
     ConversationSummary,
+    AgentRetryLog,
 )
 
 __all__ = [
@@ -34,4 +35,5 @@ __all__ = [
     "Document",
     "ConversationMessage",
     "ConversationSummary",
+    "AgentRetryLog",
 ]

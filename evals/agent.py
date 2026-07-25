@@ -53,9 +53,12 @@ from litellm import completion
 from litellm.exceptions import BadRequestError, RateLimitError
 from pydantic import BaseModel, Field
 
-from evals.memory import build_context, save_message, maybe_summarize
+from evals.memory import build_context, save_message, maybe_summarize, log_retry
+from src.telemetry import llm_span, setup_tracing
 
 load_dotenv()
+
+setup_tracing()
 
 MODEL = "groq/llama-3.1-8b-instant"  # tool-calling loop
 
@@ -260,6 +263,15 @@ def _extract_retry_seconds(error_message: str, default: float = 6.0) -> float:
     return default
 
 
+def _is_tool_error(result: str) -> bool:
+    """Detect whether a tool's returned string represents a failure,
+    so the agent can be nudged toward a different approach rather than
+    blindly repeating the same failing call."""
+    return result.startswith("Error calling search endpoint:") or result.startswith(
+        "Error evaluating expression:"
+    )
+
+
 # [MODIFIED] Restored as the plain tool-calling call (was accidentally
 # replaced by the instructor/structured version in the last edit, which
 # broke this function - it returned an AgentResponse instead of a raw
@@ -276,12 +288,20 @@ def call_llm_with_retry(messages: list, max_retries: int = 5):
     last_error = None
     for attempt in range(max_retries):
         try:
-            return completion(
-                model=MODEL,
-                messages=messages,
-                tools=TOOLS,
-                tool_choice="auto",
-            )
+            with llm_span("agent_tool_call_turn", model=MODEL) as set_tokens:
+                response = completion(
+                    model=MODEL,
+                    messages=messages,
+                    tools=TOOLS,
+                    tool_choice="auto",
+                )
+                usage = getattr(response, "usage", None)
+                if usage:
+                    set_tokens(
+                        getattr(usage, "prompt_tokens", None),
+                        getattr(usage, "completion_tokens", None),
+                    )
+                return response
         except RateLimitError as e:
             last_error = e
             wait_seconds = _extract_retry_seconds(str(e))
@@ -307,27 +327,74 @@ def call_llm_with_retry(messages: list, max_retries: int = 5):
 # for validation failures, not provider rate limits). Now uses
 # STRUCTURED_MODEL (Cerebras) instead of MODEL (Groq), so it draws from
 # an independent quota entirely.
-def call_structured_with_retry(messages: list, max_retries: int = 5):
-    """Call instructor's structured completion for the final AgentResponse,
-    retrying on rate limit errors with the same backoff logic used for the
-    tool-calling call."""
+def call_structured_with_retry(
+    messages: list, conversation_id: str, max_retries: int = 3
+):
+    """Call instructor's structured completion for the final AgentResponse.
+
+    Retries on:
+      - provider rate limits / overload (exponential backoff, not counted
+        against the 3-retry budget below since these aren't the model's
+        fault),
+      - invalid/unparseable structured output (instructor.ValidationError),
+        up to max_retries times with an explicit corrective prompt each time.
+
+    If max_retries is exhausted on invalid output, returns a plain dict
+    {"error": "Agent failed after 3 retries"} instead of raising, per spec.
+    """
+    current_messages = list(messages)
     last_error = None
-    for attempt in range(max_retries):
+
+    for attempt in range(1, max_retries + 1):
         try:
-            return instructor_client.chat.completions.create(
-                model=STRUCTURED_MODEL,
-                messages=messages,
-                response_model=AgentResponse,
-            )
-        except RateLimitError as e:
+            # Separate, unbounded-ish loop for genuine provider overload -
+            # this isn't the model "failing," it's the API being busy.
+            for overload_attempt in range(5):
+                try:
+                    return instructor_client.chat.completions.create(
+                        model=STRUCTURED_MODEL,
+                        messages=current_messages,
+                        response_model=AgentResponse,
+                    )
+                except RateLimitError as e:
+                    wait_seconds = 2 ** (overload_attempt + 1)
+                    print(
+                        f"  [overload retry {overload_attempt + 1}] "
+                        f"waiting {wait_seconds}s..."
+                    )
+                    time.sleep(wait_seconds)
+            raise RuntimeError("Provider overload retries exhausted")
+
+        except instructor.exceptions.InstructorRetryException as e:
+            # instructor already tried internally and gave up - the model
+            # could not produce valid structured output.
             last_error = e
-            wait_seconds = _extract_retry_seconds(str(e))
-            print(
-                f"  [structured retry {attempt + 1}] Rate limit hit, waiting {wait_seconds:.1f}s..."
+            asyncio.run(
+                log_retry(
+                    conversation_id,
+                    retry_type="invalid_json",
+                    attempt_number=attempt,
+                    detail=str(e)[:1000],
+                )
             )
-            time.sleep(wait_seconds)
-            continue
-    raise last_error
+            print(
+                f"  [structured retry {attempt}] Invalid structured output, retrying..."
+            )
+
+            current_messages = current_messages + [
+                {
+                    "role": "user",
+                    "content": (
+                        "Your previous response could not be parsed into the "
+                        "required JSON schema (answer: string, confidence: "
+                        "float 0-1, sources: list of strings, reasoning: "
+                        "string). Please respond again, strictly matching "
+                        "that schema with no extra text outside the fields."
+                    ),
+                }
+            ]
+
+    return {"error": "Agent failed after 3 retries"}
 
 
 # --- The agent loop, with persisted memory + structured final output -----
@@ -340,7 +407,7 @@ async def run_agent_turn(
     api_key: str,
     max_turns: int = 6,
     verbose: bool = True,
-) -> AgentResponse:
+) -> AgentResponse | dict:
     """Run one conversational turn with persisted memory: load context from
     PostgreSQL, run the tool-calling loop, then force the final answer
     through a validated AgentResponse via instructor before returning.
@@ -391,7 +458,14 @@ async def run_agent_turn(
 
             # [MODIFIED] Uses the new structured-call function with its
             # own rate-limit retry, on Cerebras instead of Groq.
-            structured_answer = call_structured_with_retry(messages)
+            structured_answer = call_structured_with_retry(messages, conversation_id)
+
+            if isinstance(structured_answer, dict) and "error" in structured_answer:
+                # Retries exhausted - return the spec'd error shape directly,
+                # without trying to save it as if it were a normal AgentResponse.
+                if verbose:
+                    print(f"  Agent failed after retries: {structured_answer}")
+                return structured_answer
 
             if verbose:
                 print(f"  [turn {turn + 1}] Final structured answer.")
@@ -413,6 +487,22 @@ async def run_agent_turn(
 
             if verbose:
                 print(f"  [turn {turn + 1}] Tool result: {result[:200]}")
+
+            # [NEW] If the tool failed, log it and append an explicit nudge so
+            # the model tries something different next turn instead of repeating
+            # the identical failing call.
+            if _is_tool_error(result):
+                await log_retry(
+                    conversation_id,
+                    retry_type="tool_error",
+                    attempt_number=turn + 1,
+                    detail=f"{name}({args}) -> {result}",
+                )
+                result += (
+                    "\n\n[System note: this tool call failed. Do not repeat the "
+                    "exact same call. Try a different query, a corrected "
+                    "expression, or a different tool if appropriate.]"
+                )
 
             messages.append(
                 {"role": "tool", "tool_call_id": tool_call.id, "content": result}
