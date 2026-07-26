@@ -22,6 +22,7 @@ from src.db.models import (
     ConversationMessage,
     ConversationSummary,
     AgentRetryLog,
+    ABTestResult,
 )
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "ConversationMessage",
     "ConversationSummary",
     "AgentRetryLog",
+    "ABTestResult",
 ]

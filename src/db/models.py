@@ -1,6 +1,6 @@
 """SQLAlchemy ORM models for logging and vector management."""
 
-from sqlalchemy import String, Integer, Text, DateTime
+from sqlalchemy import String, Integer, Text, DateTime, Float
 from sqlalchemy.sql import func
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column
 import datetime
@@ -110,6 +110,24 @@ class AgentRetryLog(Base):
     retry_type: Mapped[str] = mapped_column(String(30))  # "invalid_json" | "tool_error"
     attempt_number: Mapped[int] = mapped_column(Integer)
     detail: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ABTestResult(Base):
+    __tablename__ = "ab_test_results"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    question: Mapped[str] = mapped_column(Text)
+    config_a: Mapped[str] = mapped_column(Text)  # JSON string
+    config_b: Mapped[str] = mapped_column(Text)  # JSON string
+    answer_a: Mapped[str] = mapped_column(Text)
+    answer_b: Mapped[str] = mapped_column(Text)
+    latency_a_ms: Mapped[int] = mapped_column(Integer)
+    latency_b_ms: Mapped[int] = mapped_column(Integer)
+    cost_a_usd: Mapped[float] = mapped_column(Float)
+    cost_b_usd: Mapped[float] = mapped_column(Float)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
