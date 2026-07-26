@@ -32,6 +32,7 @@ from src.routers.evaluate import evaluate, EvalRequest
 from src.routers.api_keys import create_api_key, CreateApiKeyRequest
 from src.services.rate_limiter import limiter, log_rate_limit_hit
 from src.services.auth_dependency import require_api_key, require_admin_secret
+from src.routers.ab_test import run_ab_test, ABTestRequest
 
 from src.routers.ingest import ingest_pdf
 from src.routers.documents import get_document_status
@@ -215,3 +216,10 @@ async def ingest_endpoint(
 async def document_status_endpoint(request: Request, document_id: str):
     """Check ingestion status for a previously uploaded document."""
     return await get_document_status(document_id)
+
+
+@app.post("/ab-test", dependencies=[Depends(require_api_key)])
+@limiter.limit("60/hour")
+async def ab_test_endpoint(request: Request, body: ABTestRequest):
+    """Run a question through two configurations and compare results."""
+    return await run_ab_test(body)
