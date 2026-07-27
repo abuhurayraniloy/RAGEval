@@ -206,17 +206,17 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    Upload[POST /ingest PDF] --> Validate[Validate content type, size, content]
-    Validate --> Row[Insert documents row: status=processing]
-    Row --> Background[FastAPI background task]
-    Background --> Extract[Extract page text via PyMuPDF]
-    Extract --> Chunk[Paragraph-chunk each page]
-    Chunk --> Dense[Gemini dense embeddings]
-    Chunk --> Sparse[BM25 sparse embeddings]
-    Dense --> Upsert[Upsert named vectors into Qdrant]
+    Upload["POST /ingest PDF"] --> Validate["Validate content type, size, and content"]
+    Validate --> Row["Insert document row (status = processing)"]
+    Row --> Background["FastAPI background task"]
+    Background --> Extract["Extract page text with PyMuPDF"]
+    Extract --> Chunk["Chunk text by paragraph"]
+    Chunk --> Dense["Generate Gemini dense embeddings"]
+    Chunk --> Sparse["Generate BM25 sparse embeddings"]
+    Dense --> Upsert["Upsert named vectors into Qdrant"]
     Sparse --> Upsert
-    Upsert --> Chunks[Persist chunk metadata in PostgreSQL]
-    Chunks --> Status[Update document: completed|failed]
+    Upsert --> Chunks["Persist chunk metadata in PostgreSQL"]
+    Chunks --> Status["Update document status: completed or failed"]
 ```
 
 ---
@@ -457,20 +457,4 @@ Keep API changes aligned with the Pydantic models in `src/routers/`. Avoid docum
 
 ---
 
-## License
 
-This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
-
----
-
-## Citation
-
-If you use RAGEval in your research, please cite:
-
-```bibtex
-@software{rageval2025,
-  title = {RAGEval: Open-Source RAG Evaluation and Serving Platform},
-  year = {2025},
-  url = {https://github.com/your-org/rageval}
-}
-```
